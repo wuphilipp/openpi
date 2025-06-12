@@ -683,7 +683,6 @@ _CONFIGS = [
             repo_id="uynitsuj/xmi_bimanual_testing",
             default_prompt="testing",
             base_config=DataConfig(
-                local_files_only=True,
                 prompt_from_task=True,
             ),
         ),
@@ -697,7 +696,6 @@ _CONFIGS = [
             repo_id="uynitsuj/xmi_bimanual_testing",
             default_prompt="testing",
             base_config=DataConfig(
-                local_files_only=True,
                 prompt_from_task=True,
             ),
         ),
@@ -711,7 +709,6 @@ _CONFIGS = [
             repo_id="uynitsuj/xmi_bimanual_testing",
             default_prompt="testing",
             base_config=DataConfig(
-                local_files_only=True,
                 prompt_from_task=True,
             ),
         ),
