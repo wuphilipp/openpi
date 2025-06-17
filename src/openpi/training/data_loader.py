@@ -81,7 +81,7 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
-def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseModelConfig) -> Dataset:
+def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseModelConfig, video_backend = 'pyav') -> Dataset:
     """Create a dataset for training."""
     repo_id = data_config.repo_id
     if repo_id is None:
@@ -96,6 +96,7 @@ def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseMod
             key: [t / dataset_meta.fps for t in range(model_config.action_horizon)]
             for key in data_config.action_sequence_keys
         },
+        video_backend=video_backend,
     )
 
     if data_config.prompt_from_task:

@@ -1,3 +1,9 @@
+#!/usr/bin/env python
+
+"""
+Evaluate a trained policy on validation data.
+"""
+
 import dataclasses
 import functools
 import logging
@@ -14,8 +20,12 @@ import numpy as np
 import seaborn as sns
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 import tqdm
+import pandas as pd
+from pathlib import Path
 
 import openpi.models.model as _model
+from openpi.policies import policy as _policy
+from openpi.policies import policy_config as _policy_config
 import openpi.shared.array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.checkpoints as _checkpoints
@@ -46,97 +56,91 @@ def init_logging():
     logger.handlers[0].setFormatter(formatter)
 
 
-def load_trained_model(
+def load_trained_policy(
     config: _config.TrainConfig, 
+    checkpoint_dir: str,
     checkpoint_step: int | None = None
-) -> tuple[_model.BaseModel, training_utils.TrainState]:
-    """Load a trained model from checkpoints."""
+) -> _policy.Policy:
+    """Load a trained policy using the inference-friendly policy loader."""
     
-    # Initialize checkpoint manager
-    checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
-        config.checkpoint_dir,
-        keep_period=config.keep_period,
-        overwrite=False,
-        resume=True,
+    # If checkpoint_step is specified, append it to the directory
+    if checkpoint_step is not None:
+        checkpoint_path = f"{checkpoint_dir}/{checkpoint_step}"
+    else:
+        checkpoint_path = checkpoint_dir
+    
+    logging.info(f"Loading from checkpoint path: {checkpoint_path}")
+    
+    # Use the policy config loader which handles device/sharding differences better
+    policy = _policy_config.create_trained_policy(
+        config,
+        checkpoint_path,
+        default_prompt=None
     )
     
-    if not resuming:
-        raise ValueError(f"No checkpoints found in {config.checkpoint_dir}")
-    
-    # Initialize model architecture using the same method as training
-    rng = jax.random.key(config.seed)
-    init_rng, _ = jax.random.split(rng)
-    
-    mesh = sharding.make_mesh(config.fsdp_devices)
-    
-    # Use the same initialization logic as training
-    tx = _optimizer.create_optimizer(config.optimizer, config.lr_schedule, weight_decay_mask=None)
-
-    def init(rng: at.KeyArrayLike, partial_params: at.Params | None = None) -> training_utils.TrainState:
-        rng, model_rng = jax.random.split(rng)
-        # initialize the model (and its parameters).
-        model = config.model.create(model_rng)
-
-        # Merge the partial params into the model.
-        if partial_params is not None:
-            graphdef, state = nnx.split(model)
-            # This will produce an error if the partial params are not a subset of the state.
-            state.replace_by_pure_dict(partial_params)
-            model = nnx.merge(graphdef, state)
-
-        params = nnx.state(model)
-        # Convert frozen params to bfloat16.
-        params = nnx_utils.state_map(params, config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
-
-        return training_utils.TrainState(
-            step=0,
-            params=params,
-            model_def=nnx.graphdef(model),
-            tx=tx,
-            opt_state=tx.init(params.filter(config.trainable_filter)),
-            ema_decay=config.ema_decay,
-            ema_params=None if config.ema_decay is None else params,
-        )
-
-    # Create train state structure for loading
-    train_state_shape = jax.eval_shape(init, init_rng)
-    
-    # Load from checkpoint
-    train_state = _checkpoints.restore_state(
-        checkpoint_manager, 
-        train_state_shape, 
-        None,  # We don't need data loader for this
-        checkpoint_step
-    )
-    
-    # Reconstruct model with loaded parameters
-    # Use EMA params if available, otherwise use regular params
-    params_to_use = train_state.ema_params if train_state.ema_params is not None else train_state.params
-    model = nnx.merge(train_state.model_def, params_to_use)
-    model.eval()  # Set to evaluation mode
-    
-    return model, train_state
+    return policy
 
 
-@at.typecheck
-def evaluate_model(
-    model: _model.BaseModel,
+def evaluate_policy(
+    policy: _policy.Policy,
     observation: _model.Observation,
     actions_gt: _model.Actions,
     rng: at.KeyArrayLike,
 ) -> tuple[_model.Actions, dict[str, float]]:
-    """Evaluate model on a single batch and compute metrics."""
+    """Evaluate policy on a single batch and compute metrics."""
     
-    # Get model predictions
-    actions_pred = model.sample_actions(rng, observation)
+    # Convert observation to the format expected by policy
+    # The observation is already structured properly from the data loader
+    
+    # Get the first image key to determine batch size
+    first_image_key = next(iter(observation.images.keys()))
+    batch_size = observation.images[first_image_key].shape[0]
+    
+    # Get policy predictions for the batch
+    actions_pred_list = []
+    for i in range(batch_size):
+        # Extract single observation from batch
+        single_obs_images = {key: jnp.array(value[i]) for key, value in observation.images.items()}
+        single_obs_image_masks = {key: jnp.array(value[i]) for key, value in observation.image_masks.items()}
+        single_obs_state = jnp.array(observation.state[i])
+        
+        # Create single observation
+        single_obs = _model.Observation(
+            images=single_obs_images,
+            image_masks=single_obs_image_masks,
+            state=single_obs_state,
+            tokenized_prompt=jnp.array(observation.tokenized_prompt[i]) if observation.tokenized_prompt is not None else None,
+            tokenized_prompt_mask=jnp.array(observation.tokenized_prompt_mask[i]) if observation.tokenized_prompt_mask is not None else None,
+            token_ar_mask=jnp.array(observation.token_ar_mask[i]) if observation.token_ar_mask is not None else None,
+            token_loss_mask=jnp.array(observation.token_loss_mask[i]) if observation.token_loss_mask is not None else None,
+        )
+        
+        # Get policy prediction using infer method
+        # Convert structured observation back to dictionary format that policy expects
+        single_obs_dict = single_obs.to_dict()
+        
+        result = policy.infer(single_obs_dict)
+        action_pred = result['actions']  # Extract actions from result
+        actions_pred_list.append(action_pred)
+    
+    # Stack predictions back into batch format
+    actions_pred = jnp.stack(actions_pred_list, axis=0)
     
     # Compute metrics
     actions_gt_np = np.array(actions_gt)
     actions_pred_np = np.array(actions_pred)
     
-    # Flatten for metric computation
-    gt_flat = actions_gt_np.reshape(-1)
-    pred_flat = actions_pred_np.reshape(-1)
+    # Handle shape mismatch if needed
+    if actions_gt_np.shape != actions_pred_np.shape:
+        logging.warning(f"Shape mismatch detected. GT: {actions_gt_np.shape}, Pred: {actions_pred_np.shape}")
+        # If predicted actions have fewer dimensions, we might need to handle this
+        min_samples = min(actions_gt_np.size, actions_pred_np.size)
+        gt_flat = actions_gt_np.flatten()[:min_samples]
+        pred_flat = actions_pred_np.flatten()[:min_samples]
+    else:
+        # Flatten for metric computation
+        gt_flat = actions_gt_np.reshape(-1)
+        pred_flat = actions_pred_np.reshape(-1)
     
     metrics = {
         "mse": float(mean_squared_error(gt_flat, pred_flat)),
@@ -157,24 +161,30 @@ def plot_action_comparison(
 ):
     """Create comprehensive plots comparing ground truth vs predicted actions."""
     
-    batch_size, action_horizon, action_dim = actions_gt.shape
+    batch_size, action_horizon, gt_action_dim = actions_gt.shape
+    pred_action_dim = actions_pred.shape[2]
+    
+    # Use the smaller action dimension for plotting
+    plot_action_dim = min(gt_action_dim, pred_action_dim)
     
     if action_names is None:
-        action_names = [f"Action_{i}" for i in range(action_dim)]
+        action_names = [f"Action_{i}" for i in range(plot_action_dim)]
+    else:
+        action_names = action_names[:plot_action_dim]  # Truncate to available dimensions
     
     if sample_indices is None:
         # Select a few random samples to plot
         sample_indices = np.random.choice(batch_size, min(4, batch_size), replace=False)
     
     # Create figure with subplots
-    fig, axes = plt.subplots(len(sample_indices), action_dim, figsize=(4*action_dim, 3*len(sample_indices)))
+    fig, axes = plt.subplots(len(sample_indices), plot_action_dim, figsize=(4*plot_action_dim, 3*len(sample_indices)))
     if len(sample_indices) == 1:
         axes = axes.reshape(1, -1)
-    if action_dim == 1:
+    if plot_action_dim == 1:
         axes = axes.reshape(-1, 1)
     
     for i, sample_idx in enumerate(sample_indices):
-        for j in range(action_dim):
+        for j in range(plot_action_dim):
             ax = axes[i, j]
             
             # Plot ground truth and predicted actions
@@ -201,19 +211,29 @@ def plot_error_heatmap(
 ):
     """Create heatmap of prediction errors across time and action dimensions."""
     
-    batch_size, action_horizon, action_dim = actions_gt.shape
+    batch_size, action_horizon, gt_action_dim = actions_gt.shape
+    pred_action_dim = actions_pred.shape[2]
+    
+    # Use the smaller action dimension for error computation
+    plot_action_dim = min(gt_action_dim, pred_action_dim)
     
     if action_names is None:
-        action_names = [f"Action_{i}" for i in range(action_dim)]
+        action_names = [f"Action_{i}" for i in range(plot_action_dim)]
+    else:
+        action_names = action_names[:plot_action_dim]
+    
+    # Truncate both arrays to the same dimensions for error computation
+    actions_gt_truncated = actions_gt[:, :, :plot_action_dim]
+    actions_pred_truncated = actions_pred[:, :, :plot_action_dim]
     
     # Compute absolute errors
-    errors = np.abs(actions_gt - actions_pred)
+    errors = np.abs(actions_gt_truncated - actions_pred_truncated)
     
     # Average errors across batch
-    avg_errors = np.mean(errors, axis=0)  # Shape: (action_horizon, action_dim)
+    avg_errors = np.mean(errors, axis=0)  # Shape: (action_horizon, plot_action_dim)
     
     # Create heatmap
-    plt.figure(figsize=(max(8, action_dim), max(6, action_horizon // 2)))
+    plt.figure(figsize=(max(8, plot_action_dim), max(6, action_horizon // 2)))
     sns.heatmap(
         avg_errors.T,  # Transpose so actions are on y-axis
         annot=True,
@@ -238,8 +258,13 @@ def plot_error_distribution(
 ):
     """Plot distribution of prediction errors."""
     
+    # Handle dimension mismatch - use only the overlapping dimensions
+    min_action_dim = min(actions_gt.shape[-1], actions_pred.shape[-1])
+    actions_gt_trimmed = actions_gt[:, :, :min_action_dim]
+    actions_pred_trimmed = actions_pred[:, :, :min_action_dim]
+    
     # Compute errors
-    errors = (actions_pred - actions_gt).flatten()
+    errors = (actions_pred_trimmed - actions_gt_trimmed).flatten()
     
     # Create figure with subplots
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
@@ -249,22 +274,21 @@ def plot_error_distribution(
     ax1.axvline(0, color='red', linestyle='--', linewidth=2, label='Perfect Prediction')
     ax1.set_xlabel('Prediction Error')
     ax1.set_ylabel('Frequency')
-    ax1.set_title('Distribution of Prediction Errors')
+    ax1.set_title(f'Distribution of Prediction Errors\n(Using {min_action_dim}/{actions_gt.shape[-1]} action dims)')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
     # Box plot of absolute errors by action dimension
-    action_dim = actions_gt.shape[-1]
     abs_errors_by_dim = []
-    for i in range(action_dim):
-        abs_errors_by_dim.append(np.abs(actions_pred[:, :, i] - actions_gt[:, :, i]).flatten())
+    for i in range(min_action_dim):
+        abs_errors_by_dim.append(np.abs(actions_pred_trimmed[:, :, i] - actions_gt_trimmed[:, :, i]).flatten())
     
-    ax2.boxplot(abs_errors_by_dim, positions=range(action_dim))
+    ax2.boxplot(abs_errors_by_dim, positions=range(min_action_dim))
     ax2.set_xlabel('Action Dimension')
     ax2.set_ylabel('Absolute Error')
-    ax2.set_title('Error Distribution by Action Dimension')
-    ax2.set_xticks(range(action_dim))
-    ax2.set_xticklabels([f'A{i}' for i in range(action_dim)])
+    ax2.set_title(f'Error Distribution by Action Dimension\n({min_action_dim} dims)')
+    ax2.set_xticks(range(min_action_dim))
+    ax2.set_xticklabels([f'A{i}' for i in range(min_action_dim)])
     ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -321,25 +345,63 @@ def create_summary_metrics_plot(
     return aggregated
 
 
-def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_step: int | None = None):
+# Apply video loading patch immediately
+def patch_video_loading():
+    """Patch LeRobot to use pyav instead of torchcodec for video loading."""
+    try:
+        from lerobot.common.datasets import video_utils
+        
+        # Patch the default codec function to return pyav instead of torchcodec
+        def patched_get_safe_default_codec():
+            """Always return pyav as the default codec."""
+            return "pyav"
+        
+        # Replace the function in the module
+        video_utils.get_safe_default_codec = patched_get_safe_default_codec
+        
+        # Also patch the decode_video_frames function directly
+        original_decode = video_utils.decode_video_frames
+        def patched_decode_video_frames(video_path, timestamps, tolerance_s, backend=None):
+            """Force pyav backend."""
+            return video_utils.decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend="pyav")
+        
+        video_utils.decode_video_frames = patched_decode_video_frames
+        
+        logging.info("Successfully patched video loading to use pyav backend")
+        return True
+    except Exception as e:
+        logging.warning(f"Failed to patch video loading: {e}")
+        return False
+
+# Apply patch immediately on import
+patch_video_loading()
+
+
+def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_step: int | None = None, checkpoint_dir: str | None = None):
     """Main evaluation function."""
     
-    init_logging()
     logging.info(f"Running evaluation on: {platform.node()}")
     
+    # Determine checkpoint directory
+    checkpoint_path = checkpoint_dir if checkpoint_dir is not None else str(config.checkpoint_dir)
+    
     # Create output directory
-    eval_output_dir = config.checkpoint_dir / "evaluation"
+    eval_output_dir = epath.Path(checkpoint_path) / "evaluation"
     eval_output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Load trained model
-    logging.info("Loading trained model...")
-    model, train_state = load_trained_model(config, checkpoint_step)
-    logging.info(f"Loaded model from step {train_state.step}")
+    # Load trained policy
+    logging.info("Loading trained policy...")
+    policy = load_trained_policy(config, checkpoint_path, checkpoint_step)
+    logging.info(f"Loaded policy successfully")
     
-    # Create data loader
+    # Create data loader with real data
     logging.info("Creating data loader...")
     mesh = sharding.make_mesh(config.fsdp_devices)
     data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
+    
+    # Force video backend to pyav in config
+    if hasattr(config.data, 'video_backend'):
+        config.data.video_backend = "pyav"
     
     data_loader = _data_loader.create_data_loader(
         config,
@@ -347,6 +409,7 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
         num_workers=config.num_workers,
         shuffle=False,  # Don't shuffle for evaluation
         num_batches=num_eval_batches,
+        skip_norm_stats=True,  # Skip normalization stats - use those from the trained model
     )
     
     # Setup evaluation
@@ -365,7 +428,7 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
         
         # Run inference
         eval_rng = jax.random.fold_in(rng, batch_idx)
-        actions_pred, metrics = evaluate_model(model, observation, actions_gt, eval_rng)
+        actions_pred, metrics = evaluate_policy(policy, observation, actions_gt, eval_rng)
         
         # Store results
         all_metrics.append(metrics)
@@ -375,7 +438,7 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
         # Log progress
         if batch_idx % 5 == 0:
             logging.info(f"Batch {batch_idx}: MSE={metrics['mse']:.4f}, MAE={metrics['mae']:.4f}")
-    
+
     # Concatenate all results
     all_actions_gt = np.concatenate(all_actions_gt, axis=0)
     all_actions_pred = np.concatenate(all_actions_pred, axis=0)
@@ -437,16 +500,16 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
         str(eval_output_dir / "summary_metrics.png"),
     )
     
-    # Save detailed results
+    # Save detailed results (excluding config which may not be JSON serializable)
     results = {
         'summary_metrics': summary_metrics,
         'all_metrics': all_metrics,
-        'config': dataclasses.asdict(config),
         'evaluation_info': {
             'num_batches': num_eval_batches,
-            'total_samples': all_actions_gt.shape[0],
-            'action_shape': all_actions_gt.shape,
-            'checkpoint_step': int(train_state.step),
+            'total_samples': int(all_actions_gt.shape[0]),
+            'action_shape': [int(x) for x in all_actions_gt.shape],
+            'checkpoint_step': checkpoint_step if checkpoint_step is not None else 'latest',
+            'config_name': config.name if hasattr(config, 'name') else 'unknown',
         }
     }
     
@@ -475,10 +538,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate a trained OpenPI model")
     parser.add_argument("--config-name", type=str, required=True, help="Name of the training config to use")
     parser.add_argument("--exp-name", type=str, default=None, help="Experiment name (required if not set in config)")
+    parser.add_argument("--checkpoint-dir", type=str, default=None, help="Override checkpoint directory (default: use config.checkpoint_dir)")
     parser.add_argument("--num-eval-batches", type=int, default=10, help="Number of batches to evaluate on")
     parser.add_argument("--checkpoint-step", type=int, default=None, help="Specific checkpoint step to load (default: latest)")
     
     args = parser.parse_args()
+    
+    # Initialize logging early for error messages
+    init_logging()
     
     # Load config
     config = _config.get_config(args.config_name)
@@ -487,5 +554,17 @@ if __name__ == "__main__":
     if args.exp_name is not None:
         config = dataclasses.replace(config, exp_name=args.exp_name)
     
+    # Validate that exp_name is set
+    try:
+        # This will trigger the error if exp_name is missing
+        _ = config.checkpoint_dir
+    except (TypeError, AttributeError) as e:
+        if "PropagatingMissingType" in str(e) or "unsupported operand type" in str(e):
+            logging.error("Experiment name (exp_name) is not set in the config and not provided via --exp-name")
+            logging.error("Please provide --exp-name argument or ensure the config has exp_name set")
+            exit(1)
+        else:
+            raise
+    
     # Run evaluation
-    main(config, args.num_eval_batches, args.checkpoint_step) 
+    main(config, args.num_eval_batches, args.checkpoint_step, args.checkpoint_dir) 
