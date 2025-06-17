@@ -18,6 +18,7 @@ class EnvMode(enum.Enum):
     ALOHA_SIM = "aloha_sim"
     DROID = "droid"
     LIBERO = "libero"
+    XDOF = "xdof"
 
 
 @dataclasses.dataclass
@@ -47,7 +48,7 @@ class Args:
     default_prompt: str | None = None
 
     # Port to serve the policy on.
-    port: int = 8000
+    port: int = 8111
     # Record the policy's behavior for debugging.
     record: bool = False
 
@@ -57,6 +58,10 @@ class Args:
 
 # Default checkpoints that should be used for each environment.
 DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
+    EnvMode.XDOF: Checkpoint(
+        config="pi0_yam_low_mem_finetune",
+        dir="/home/justinyu/checkpoints/pi0_yam_low_mem_finetune/load_dishes/18000",
+    ),
     EnvMode.ALOHA: Checkpoint(
         config="pi0_aloha",
         dir="s3://openpi-assets/checkpoints/pi0_base",
