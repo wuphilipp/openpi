@@ -96,8 +96,7 @@ def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseMod
             key: [t / dataset_meta.fps for t in range(model_config.action_horizon)]
             for key in data_config.action_sequence_keys
         },
-        if video_backend is not None:
-            video_backend=video_backend,
+        video_backend=video_backend,
     )
 
     if data_config.prompt_from_task:
