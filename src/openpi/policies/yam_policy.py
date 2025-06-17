@@ -18,6 +18,13 @@ def make_yam_example() -> dict:
         "prompt": "do something",
     }
 
+def _parse_image(image) -> np.ndarray:
+    image = np.asarray(image)
+    if np.issubdtype(image.dtype, np.floating):
+        image = (255 * image).astype(np.uint8)
+    if image.shape[0] == 3:
+        image = einops.rearrange(image, "c h w -> h w c")
+    return image
 
 @dataclasses.dataclass(frozen=True)
 class YamInputs(transforms.DataTransformFn):
@@ -45,64 +52,21 @@ class YamInputs(transforms.DataTransformFn):
         # Get the state. We are padding from 14 to the model action dim.
         state = transforms.pad_to_dim(data["state"], self.action_dim)
 
-        # Process images
-        in_images = {}
-        for camera_key in ["left_camera-images-rgb", "right_camera-images-rgb", "top_camera-images-rgb"]:
-            if camera_key in data:
-                in_images[camera_key] = data[camera_key]
+        base_image = _parse_image(data["top_camera-images-rgb"])
+        left_wrist_image = _parse_image(data["left_camera-images-rgb"])
+        right_wrist_image = _parse_image(data["right_camera-images-rgb"])
 
-        if set(in_images) - set(self.EXPECTED_CAMERAS):
-            raise ValueError(f"Expected images to contain subset of {self.EXPECTED_CAMERAS}, got {tuple(in_images)}")
+        images = {
+            "base_0_rgb": base_image,
+            "left_wrist_0_rgb": left_wrist_image,
+            "right_wrist_0_rgb": right_wrist_image,
+        }
 
-        # Convert images to the expected format
-        def convert_image(img):
-            img = np.asarray(img)
-            # Convert to uint8 if using float images.
-            if np.issubdtype(img.dtype, np.floating):
-                img = (255 * img).astype(np.uint8)
-            # Convert from [channel, height, width] to [height, width, channel] if needed.
-            if img.shape[0] == 3:
-                img = einops.rearrange(img, "c h w -> h w c")
-            return img
-
-        # Process available images
-        processed_images = {}
-        for camera_key in in_images:
-            processed_images[camera_key] = convert_image(in_images[camera_key])
-
-        # Use the first available image as base image, or create a default
-        if processed_images:
-            base_image = next(iter(processed_images.values()))
-        else:
-            base_image = np.zeros((224, 224, 3), dtype=np.uint8)
-
-        match self.model_type:
-            case _model.ModelType.PI0:
-                # Map YAM cameras to standard PI0 camera names
-                images = {
-                    "base_0_rgb": processed_images.get("top_camera-images-rgb", np.zeros_like(base_image)),  # Top camera as base
-                    "left_wrist_0_rgb": processed_images.get("left_camera-images-rgb", np.zeros_like(base_image)),  # Left camera
-                    "right_wrist_0_rgb": processed_images.get("right_camera-images-rgb", np.zeros_like(base_image)),  # Right camera
-                }
-                image_masks = {
-                    "base_0_rgb": "top_camera-images-rgb" in processed_images,
-                    "left_wrist_0_rgb": "left_camera-images-rgb" in processed_images,
-                    "right_wrist_0_rgb": "right_camera-images-rgb" in processed_images,
-                }
-            case _model.ModelType.PI0_FAST:
-                # For FAST models, we don't mask out padding images
-                images = {
-                    "base_0_rgb": processed_images.get("top_camera-images-rgb", np.zeros_like(base_image)),
-                    "base_1_rgb": processed_images.get("left_camera-images-rgb", np.zeros_like(base_image)),
-                    "wrist_0_rgb": processed_images.get("right_camera-images-rgb", np.zeros_like(base_image)),
-                }
-                image_masks = {
-                    "base_0_rgb": np.True_,
-                    "base_1_rgb": np.True_,
-                    "wrist_0_rgb": np.True_,
-                }
-            case _:
-                raise ValueError(f"Unsupported model type: {self.model_type}")
+        image_masks = {
+            "base_0_rgb": np.True_,
+            "left_wrist_0_rgb": np.True_,
+            "right_wrist_0_rgb": np.True_,
+        }
 
         inputs = {
             "state": state,
