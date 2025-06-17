@@ -773,8 +773,8 @@ _CONFIGS = [
         name="pi0_yam",
         model=pi0.Pi0Config(action_horizon=10),
         data=LeRobotYamDataConfig(
-            repo_id="uynitsuj/yam_bimanual_load_dishes",
-            default_prompt="load dishes",
+            repo_id="uynitsuj/yam_bimanual_load_dishes_absolute",
+            default_prompt="Load dishes onto tabletop dishrack",
             base_config=DataConfig(
                 prompt_from_task=True,
             ),
@@ -786,8 +786,8 @@ _CONFIGS = [
         name="pi0_yam_low_mem_finetune",
         model=pi0.Pi0Config(action_horizon=10, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotYamDataConfig(
-            repo_id="uynitsuj/yam_bimanual_load_dishes",
-            default_prompt="load dishes",
+            repo_id="uynitsuj/yam_bimanual_load_dishes_absolute",
+            default_prompt="Load dishes onto tabletop dishrack",
             base_config=DataConfig(
                 prompt_from_task=True,
             ),
