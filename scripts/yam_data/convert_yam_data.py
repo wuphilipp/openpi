@@ -5,6 +5,12 @@ Direct YAMS to LeRobot format converter.
 This script bypasses the LeRobot dataset creation completely and directly creates
 the dataset in the same format as LeRobot, avoiding memory accumulation and 
 ffmpeg-python import issues.
+
+
+FOR LARGE DATASETS, HF MAY RATE LIMIT WITH REGULAR PUSH SO INSTEAD SET push_to_hub=False AND USE:
+
+huggingface-cli upload-large-folder <repo-id> <local-path> --repo-type=dataset
+
 """
 
 import json
