@@ -11,6 +11,7 @@ import flax.traverse_util as traverse_util
 import jax
 import jax.experimental
 import jax.numpy as jnp
+import numpy as np
 import optax
 import tqdm_loggable.auto as tqdm
 import wandb
@@ -25,6 +26,12 @@ import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
+
+try:
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
 
 
 def init_logging():
@@ -44,6 +51,101 @@ def init_logging():
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logger.handlers[0].setFormatter(formatter)
+
+
+def save_debug_images(observation: _model.Observation, step: int, checkpoint_dir: epath.Path, 
+                      data_config: _config.DataConfig = None):
+    """Save sample images from the observation for debugging purposes."""
+    debug_dir = checkpoint_dir / "debug_images"
+    debug_dir.mkdir(exist_ok=True)
+    
+    # Convert JAX arrays to numpy for easier handling
+    images = jax.device_get(observation.images)
+    image_masks = jax.device_get(observation.image_masks)
+    
+    # Save first sample from the batch
+    sample_idx = 0
+    step_dir = debug_dir / f"step_{step:06d}"
+    step_dir.mkdir(exist_ok=True)
+    
+    # Store images for visualization
+    camera_images = {}
+    
+    for camera_name, img_batch in images.items():
+        if sample_idx < img_batch.shape[0]:  # Check if sample exists in batch
+            img = img_batch[sample_idx]  # Shape: (H, W, C)
+            mask = image_masks[camera_name][sample_idx] if camera_name in image_masks else True
+            
+            # Check if images are actually normalized (they're not in YAM)
+            image_is_normalized = (data_config is not None and 
+                                 data_config.norm_stats is not None and 
+                                 f"image/{camera_name}" in data_config.norm_stats)
+            
+            # Convert from float32 [-1,1] to uint8 [0,255] if needed
+            if img.dtype == np.float32:
+                img = (np.clip(img, -1, 1) * 127.5 + 127.5).astype(np.uint8)
+            
+            # Store for visualization
+            camera_images[camera_name] = img
+            
+            # Save as .npy file with stats
+            img_path = step_dir / f"{camera_name}_sample_{sample_idx}.npy"
+            np.save(img_path, img)
+            
+            # Log image stats
+            stats_path = step_dir / f"{camera_name}_sample_{sample_idx}_stats.txt"
+            with open(stats_path, 'w') as f:
+                f.write(f"Camera: {camera_name}\n")
+                f.write(f"Step: {step}\n")
+                f.write(f"Sample index: {sample_idx}\n")
+                f.write(f"Image mask: {mask}\n")
+                f.write(f"Image normalization applied: {image_is_normalized}\n")
+                f.write(f"\n--- TRAINING IMAGE (after pipeline) ---\n")
+                f.write(f"Image shape: {img.shape}\n")
+                f.write(f"Image dtype: {img.dtype}\n")
+                f.write(f"Image min: {img.min()}\n")
+                f.write(f"Image max: {img.max()}\n")
+                f.write(f"Image mean: {img.mean():.4f}\n")
+                f.write(f"Image std: {img.std():.4f}\n")
+                f.write(f"Non-zero pixels: {np.count_nonzero(img)}/{img.size} ({100 * np.count_nonzero(img) / img.size:.2f}%)\n")
+                
+                if not image_is_normalized:
+                    f.write(f"\nNOTE: Images are NOT normalized in this config.\n")
+                    f.write(f"The training pipeline preserves original image intensity values.\n")
+                    f.write(f"Raw LeRobot data: float32 [0,1] -> Training data: uint8 [0,255]\n")
+    
+    # Create visualization if matplotlib is available
+    if MATPLOTLIB_AVAILABLE and camera_images:
+        try:
+            camera_names = list(camera_images.keys())
+            num_cameras = len(camera_names)
+            
+            fig, axes = plt.subplots(1, num_cameras, figsize=(5 * num_cameras, 5))
+            if num_cameras == 1:
+                axes = [axes]  # Make it a list for consistency
+            
+            for i, camera_name in enumerate(camera_names):
+                img = camera_images[camera_name]
+                axes[i].imshow(img)
+                axes[i].set_title(f"{camera_name}\nStep {step}\nMean: {img.mean():.1f}, Std: {img.std():.1f}")
+                axes[i].axis('off')
+            
+            plt.tight_layout()
+            
+            # Save visualization
+            viz_path = step_dir / f"step_{step:06d}_visualization.png"
+            plt.savefig(viz_path, dpi=150, bbox_inches='tight')
+            plt.close()  # Close to free memory
+            
+            logging.info(f"Saved debug images and visualization for step {step} to {step_dir}")
+        except Exception as e:
+            logging.warning(f"Failed to create visualization for step {step}: {e}")
+            logging.info(f"Saved debug images for step {step} to {step_dir}")
+    else:
+        if not MATPLOTLIB_AVAILABLE:
+            logging.info(f"Saved debug images for step {step} to {step_dir} (matplotlib not available for visualization)")
+        else:
+            logging.info(f"Saved debug images for step {step} to {step_dir}")
 
 
 def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = False, enabled: bool = True):
@@ -222,6 +324,7 @@ def main(config: _config.TrainConfig):
         num_workers=config.num_workers,
         shuffle=True,
     )
+    data_config = data_loader.data_config()  # Get the data config for debug image unnormalization
     data_iter = iter(data_loader)
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
@@ -260,6 +363,12 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+        
+        # Save debug images periodically (every 100 steps for the first 1000 steps, then every 1000 steps)
+        if (step < 1000 and step % 100 == 0) or (step >= 1000 and step % 1000 == 0) or step == 0:
+            observation, _ = batch
+            save_debug_images(observation, step, config.checkpoint_dir, data_config)
+        
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
