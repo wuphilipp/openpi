@@ -161,7 +161,6 @@ def process_joint_data(joint_data: Dict) -> Optional[np.ndarray]:
     seq_length = len(left_joint_pos)
     full_joint_state = np.empty((seq_length, 14), dtype=np.float32)
     
-    # Fill the array efficiently
     full_joint_state[:, :6] = left_joint_pos
     full_joint_state[:, 6:7] = left_gripper_pos
     full_joint_state[:, 7:13] = right_joint_pos
