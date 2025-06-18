@@ -394,6 +394,8 @@ class YAMSBaseInterface:
 
     def update_cfg(self, cfg_left, cfg_right):
         """Update the robot configurations."""
+        cfg_left = onp.flip(cfg_left, axis=0)
+        cfg_right = onp.flip(cfg_right, axis=0)
         self.joints_left = cfg_left
         self.joints_right = cfg_right
         self.urdf_vis_left.update_cfg(onp.array(self.joints_left))
