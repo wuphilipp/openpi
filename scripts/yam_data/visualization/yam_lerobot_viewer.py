@@ -23,15 +23,7 @@ from typing import Literal
 import jaxlie
 import jsonlines
 import jax.numpy as jnp
-
-# Import YAMS base interface (assuming it's available)
-# try:
 from yam_base import YAMSBaseInterface
-#     HAS_YAMS_BASE = True
-# except Exception as e:
-#     print(e)
-#     print("Warning: YAMS base interface not available.")
-#     HAS_YAMS_BASE = False
 
 
 class YAMSLeRobotViewer:
@@ -150,8 +142,8 @@ class YAMSLeRobotViewer:
         print(f"Action dimension: {self.action_dim}")
         
         # Validate YAMS dimensions (should be 14: 6 joints + 1 gripper per arm)
-        if self.state_dim != 14 or self.action_dim != 14:
-            print(f"Warning: Expected 14D state/action for YAMS, got {self.state_dim}D/{self.action_dim}D")
+        if self.state_dim != 14 and self.state_dim != 20 or self.action_dim != 14 and self.action_dim != 20:
+            print(f"Warning: Expected 14D or 20D state/action for YAMS, got {self.state_dim}D/{self.action_dim}D")
     
     def _load_episode_data(self, episode_idx: int):
         """Load data for a specific episode."""
@@ -450,55 +442,84 @@ class YAMSLeRobotViewer:
         right_gripper = state[13]
         
         return left_joints, left_gripper, right_joints, right_gripper
+
+    def _parse_yams_state_cartesian(self, state: np.ndarray) -> Tuple[vtf.SE3, float, vtf.SE3, float]:
+        """
+        Parse YAMS state vector into cartesian state.
+        """
+        if len(state) != 20:
+            state = np.pad(state, (0, 20 - len(state)))
+        from openpi.utils.matrix_utils import rot_6d_to_rot_mat
+        left_se3 = vtf.SE3.from_rotation_and_translation(vtf.SO3.from_matrix(rot_6d_to_rot_mat(state[0:6])), state[6:9])
+        left_gripper = state[9]
+        right_se3 = vtf.SE3.from_rotation_and_translation(vtf.SO3.from_matrix(rot_6d_to_rot_mat(state[10:16])), state[16:19])
+        right_gripper = state[19]
+        
+        return left_se3, left_gripper, right_se3, right_gripper
+        
     
     def _update_visualization(self):
         """Update the 3D visualization."""
         frame_idx = self.current_frame_in_episode
         self.frame_info.value = f"Frame {frame_idx}/{self.episode_length-1}"
-        
-        if 'states' in self.episode_data and frame_idx < len(self.episode_data['states']):
-            state = self.episode_data['states'][frame_idx]
-            left_joints, left_gripper, right_joints, right_gripper = self._parse_yams_state(state)
 
-            # debug print numpy array at 2 sig figs
-            # print(f"left_joints: {left_joints.round(2)}")
-            # print(f"right_joints: {right_joints.round(2)}")
-            # print('\n\n')
-            
-            self.left_gripper_pos.value = float(left_gripper)
-            self.right_gripper_pos.value = float(right_gripper)
-            
-            self.left_joints_info.value = ", ".join([f"{j:.3f}" for j in left_joints])
-            self.right_joints_info.value = ", ".join([f"{j:.3f}" for j in right_joints])
-            
-            if self.yams_base_interface and self.show_robot.value:
-                self.yams_base_interface.update_cfg(left_joints, right_joints)
+        if self.episode_data['states'].shape[-1] == 14: # joint state
+            if 'states' in self.episode_data and frame_idx < len(self.episode_data['states']):
+                state = self.episode_data['states'][frame_idx]
+                left_joints, left_gripper, right_joints, right_gripper = self._parse_yams_state(state)
 
-                # --- Forward Kinematics to update EE frames ---
-                try:
-                    # Get target link names, fallback to default
+                # debug print numpy array at 2 sig figs
+                # print(f"left_joints: {left_joints.round(2)}")
+                # print(f"right_joints: {right_joints.round(2)}")
+                # print('\n\n')
+                
+                self.left_gripper_pos.value = float(left_gripper)
+                self.right_gripper_pos.value = float(right_gripper)
+                
+                self.left_joints_info.value = ", ".join([f"{j:.3f}" for j in left_joints])
+                self.right_joints_info.value = ", ".join([f"{j:.3f}" for j in right_joints])
+                
+                if self.yams_base_interface and self.show_robot.value:
+                    self.yams_base_interface.update_cfg(left_joints, right_joints)
+
+                    # --- Forward Kinematics to update EE frames ---
                     try:
-                        target_names = [self.yams_base_interface.target_names[0]]
-                        if len(self.yams_base_interface.target_names) > 1:
-                            target_names.append(self.yams_base_interface.target_names[1])
-                        else:
-                            target_names.append(self.yams_base_interface.target_names[0])
-                    except (AttributeError, IndexError):
-                        target_names = None  # Will use defaults in the method
-                    
-                    # Compute FK
-                    left_ee_pose, right_ee_pose = self.yams_base_interface.solve_fk(
-                        left_joints, right_joints, target_names
-                    )
-                    
-                    # Update EE frame positions
-                    self.left_ee_frame.position = np.array(left_ee_pose.translation())
-                    self.left_ee_frame.wxyz = np.array(left_ee_pose.rotation().wxyz)
-                    self.right_ee_frame.position = np.array(right_ee_pose.translation())
-                    self.right_ee_frame.wxyz = np.array(right_ee_pose.rotation().wxyz)
-                    
-                except Exception as e:
-                    print(f"FK calculation failed: {e}")
+                        # Get target link names, fallback to default
+                        try:
+                            target_names = [self.yams_base_interface.target_names[0]]
+                            if len(self.yams_base_interface.target_names) > 1:
+                                target_names.append(self.yams_base_interface.target_names[1])
+                            else:
+                                target_names.append(self.yams_base_interface.target_names[0])
+                        except (AttributeError, IndexError):
+                            target_names = None  # Will use defaults in the method
+                        
+                        # Compute FK using unified interface (world coordinates for visualization)
+                        left_ee_pose, right_ee_pose = self.yams_base_interface.solve_fk(
+                            left_joints, right_joints, target_names, coordinate_frame="world"
+                        )
+                        
+                        # Update EE frame positions
+                        self.left_ee_frame.position = np.array(left_ee_pose.translation())
+                        self.left_ee_frame.wxyz = np.array(left_ee_pose.rotation().wxyz)
+                        self.right_ee_frame.position = np.array(right_ee_pose.translation())
+                        self.right_ee_frame.wxyz = np.array(right_ee_pose.rotation().wxyz)
+                        
+                    except Exception as e:
+                        print(f"FK calculation failed: {e}")
+
+        elif self.episode_data['states'].shape[-1] == 20: # cartesian state
+            if 'states' in self.episode_data and frame_idx < len(self.episode_data['states']):
+                state = self.episode_data['states'][frame_idx]
+                left_se3, left_gripper, right_se3, right_gripper = self._parse_yams_state_cartesian(state)
+
+                self.left_gripper_pos.value = float(left_gripper)
+                self.right_gripper_pos.value = float(right_gripper)
+
+                self.left_ee_frame.position = np.array(left_se3.wxyz_xyz[0, -3:])
+                self.left_ee_frame.wxyz = np.array(left_se3.rotation().wxyz[0])
+                self.right_ee_frame.position = np.array(right_se3.wxyz_xyz[0,-3:]) + np.array([0.0, -0.61, 0.0])
+                self.right_ee_frame.wxyz = np.array(right_se3.rotation().wxyz[0])
         
         for camera_key, display in self.camera_displays.items():
             if camera_key in self.episode_data and frame_idx < len(self.episode_data[camera_key]):
@@ -527,7 +548,7 @@ class YAMSLeRobotViewer:
 
 
 def main(
-    dataset_path: str = "/home/justinyu/nfs_us/justinyu/yam_lerobot_datasets/uynitsuj/yam_debug",
+    dataset_path: str = "/home/justinyu/nfs_us/justinyu/yam_lerobot_datasets/uynitsuj/yam_debug_cartesian_space",
 ):
     """
     Main function for YAMS LeRobot trajectory viewer.

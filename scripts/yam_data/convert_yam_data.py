@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
-from typing import List, Optional
+from typing import List, Optional, Literal
 import numpy as np
 import tyro
 import gc
@@ -42,7 +42,7 @@ class YAMSConfig:
 
     ])
     output_dir: Path = Path("/home/justinyu/nfs_us/justinyu/yam_lerobot_datasets")
-    repo_name: str = "uynitsuj/yam_debug"
+    repo_name: str = "uynitsuj/yam_debug_cartesian_space"
     language_instruction: str = "Perform bimanual manipulation task" # Default task name; gets overwritten by task name in metadata
     
     # YAMS camera keys
@@ -50,15 +50,17 @@ class YAMSConfig:
         "left_camera-images-rgb", "right_camera-images-rgb", "top_camera-images-rgb"
     ])
     
-    resize_size: int = 224
-    fps: int = 30
-    chunk_size: int = 1000
-    max_workers: int = 4 # Set lower on machines with less memory
+    resize_size: int = 224 # image size
+    fps: int = 30 # video fps
+    chunk_size: int = 1000 # number of frames per chunk (for memory considerations)
+    max_workers: int = 1 # Set lower on machines with less memory
     no_filter_quality: bool = False # If True, will not filter out low quality episodes
-    max_episodes: Optional[int] = None
-    skip_videos: bool = False
+    max_episodes: Optional[int] = None # If specified, will only process this many episodes
+    skip_videos: bool = False # If True, will not process videos
     push_to_hub: bool = True # If True, will push to huggingface hub after processing
     push_to_hub_only: bool = False  # Only push existing dataset to hub, skip processing
+
+    action_space: Literal["abs_joint", "abs_cartesian"] = "abs_cartesian" # "abs_joint" for absolute joint positions, "abs_cartesian" for absolute cartesian positions
     
     # Memory management settings
     max_frames_per_chunk: int = 1000  # Process episodes in chunks to avoid OOM on long episodes
@@ -68,6 +70,7 @@ class YAMSConfig:
     encoder_name: Optional[str] = None  # Force specific encoder, or None for auto-selection
     encoding_quality: str = 'fastest'  # 'fastest' or 'fast'
 
+    robot: Optional[object] = field(default=None, repr=False) # YAMSBaseInterface object (Populated later)
 
 # Import utility modules
 try:
@@ -76,7 +79,8 @@ try:
         is_episode_good_quality,
         load_yams_episode_data_fast,
         process_joint_data,
-        calculate_actions
+        calculate_actions,
+        calculate_actions_cartesian
     )
 except ImportError:
     from data_utils import (
@@ -84,7 +88,8 @@ except ImportError:
         is_episode_good_quality,
         load_yams_episode_data_fast,
         process_joint_data,
-        calculate_actions
+        calculate_actions,
+        calculate_actions_cartesian
     )
 
 def extract_task_name_from_episode(episode_data: dict, episode_path: Path) -> str:
@@ -551,22 +556,31 @@ def compute_basic_episode_stats(episode_idx: int, episode_info: dict, cfg: YAMSC
     # Load the episode parquet file
     chunk_id = episode_idx // cfg.chunk_size
     parquet_path = base_dir / "data" / f"chunk-{chunk_id:03d}" / f"episode_{episode_idx:06d}.parquet"
+
+    if cfg.action_space == 'abs_joint':
+        state_dim = 14
+        action_dim = 14
+    elif cfg.action_space == 'abs_cartesian':
+        state_dim = 20
+        action_dim = 20
+    else:
+        raise ValueError(f"Invalid action space: {cfg.action_space}, or not implemented yet")
     
     if not parquet_path.exists():
         # Return minimal stats if parquet doesn't exist
         return {
             "state": {
-                "min": np.zeros(14, dtype=np.float32),
-                "max": np.zeros(14, dtype=np.float32), 
-                "mean": np.zeros(14, dtype=np.float32),
-                "std": np.ones(14, dtype=np.float32),
+                "min": np.zeros(state_dim, dtype=np.float32),
+                "max": np.zeros(state_dim, dtype=np.float32), 
+                "mean": np.zeros(state_dim, dtype=np.float32),
+                "std": np.ones(state_dim, dtype=np.float32),
                 "count": np.array([1], dtype=np.int64)
             },
             "actions": {
-                "min": np.zeros(14, dtype=np.float32),
-                "max": np.zeros(14, dtype=np.float32),
-                "mean": np.zeros(14, dtype=np.float32),
-                "std": np.ones(14, dtype=np.float32),
+                "min": np.zeros(action_dim, dtype=np.float32),
+                "max": np.zeros(action_dim, dtype=np.float32),
+                "mean": np.zeros(action_dim, dtype=np.float32),
+                "std": np.ones(action_dim, dtype=np.float32),
                 "count": np.array([1], dtype=np.int64)
             },
         }
@@ -670,7 +684,13 @@ def process_episode_in_chunks(episode_data: dict, cfg: YAMSConfig, max_chunk_fra
         return [], {}
     
     # Calculate actions for the full episode (joint data is manageable)
-    joint_states, joint_actions = calculate_actions(full_joint_state, total_length)
+    if cfg.action_space == 'abs_joint':
+        states, actions = calculate_actions(full_joint_state, total_length)
+    elif cfg.action_space == 'abs_cartesian':
+        states, actions = calculate_actions_cartesian(full_joint_state, total_length, cfg.robot)
+    else:
+        raise ValueError(f"Invalid action space: {cfg.action_space}, or not implemented yet")
+
     
     all_records = []
     all_image_data = {}
@@ -683,8 +703,8 @@ def process_episode_in_chunks(episode_data: dict, cfg: YAMSConfig, max_chunk_fra
         # print(f"  Processing frames {chunk_start}-{chunk_end-1} ({chunk_length} frames)")
         
         # Process joint data for this chunk
-        chunk_joint_states = joint_states[chunk_start:chunk_end]
-        chunk_joint_actions = joint_actions[chunk_start:chunk_end]
+        chunk_states = states[chunk_start:chunk_end]
+        chunk_actions = actions[chunk_start:chunk_end]
         
         # Process images for this chunk if not skipping videos
         chunk_image_data = {}
@@ -711,11 +731,11 @@ def process_episode_in_chunks(episode_data: dict, cfg: YAMSConfig, max_chunk_fra
         # Create records for this chunk
         for step in range(chunk_length):
             global_step = chunk_start + step
-            joint_pos = chunk_joint_states[step]
-            action = chunk_joint_actions[step]
+            state = chunk_states[step]
+            action = chunk_actions[step]
             
             record = {
-                "state": joint_pos.tolist(),
+                "state": state.tolist(),
                 "actions": action.tolist(),
                 "timestamp": [global_step / cfg.fps],
                 "frame_index": [global_step],
@@ -947,6 +967,19 @@ def main(cfg: YAMSConfig):
     """Main function to convert YAMS data to LeRobot format."""
     
     print("=== Direct YAMS to LeRobot Converter ===")
+
+    if cfg.action_space == 'abs_cartesian':
+        try:
+            from visualization.yam_base import YAMSBaseInterface
+        except Exception as e:
+            print(f"Error importing YAMSBaseInterface: {e}, cartesian action space will not be available")
+
+        # kinematics using pyroki (made available in the case of cartesian action space)
+        cfg.robot = YAMSBaseInterface(minimal=True) # YAMSBaseInterface object
+    else:
+        robot = None
+    
+    print(cfg)
     
     # Handle push-to-hub-only mode
     if cfg.push_to_hub_only:
@@ -1245,15 +1278,24 @@ def main(cfg: YAMSConfig):
     actual_chunks = (len(all_combined_episodes) + cfg.chunk_size - 1) // cfg.chunk_size
     
     # Write info.json
+    if cfg.action_space == 'abs_joint':
+        state_dim = 14
+        action_dim = 14
+    elif cfg.action_space == 'abs_cartesian':
+        state_dim = 20
+        action_dim = 20
+    else:
+        raise ValueError(f"Invalid action space: {cfg.action_space}, or not implemented yet")
+
     features = {
         "state": {
             "dtype": "float32", 
-            "shape": [14],  # YAMS joint state dimension (6 joints + 1 gripper per arm × 2 arms)
+            "shape": [state_dim],  # YAMS joint state dimension (6 joints + 1 gripper per arm × 2 arms)
             "names": ["state"],
         },
         "actions": {
             "dtype": "float32",
-            "shape": [14],  # YAMS action dimension (6 joints + 1 gripper per arm × 2 arms)
+            "shape": [action_dim],  # YAMS action dimension (6 joints + 1 gripper per arm × 2 arms)
             "names": ["actions"],
         },
         "timestamp": {"dtype": "float32", "shape": [1], "names": None},

@@ -50,6 +50,14 @@ def rot_mat_to_rot_6d(rot_mat : onp.ndarray) -> onp.ndarray:
     rot_6d = rot_mat[:, :2, :] # N, 2, 3
     return rot_6d.reshape(-1, 6) # N, 6
 
+def quat_to_rot_6d(quat : onp.ndarray, scalar_first: bool = True) -> onp.ndarray:
+    """
+    Convert a quaternion to 6d representation
+    quat: N, 4
+    scalar_first: bool # If True, the quaternion is in the format [w, x, y, z], otherwise [x, y, z, w]
+    """
+    rot_mat = Rotation.from_quat(quat, scalar_first=scalar_first).as_matrix()
+    return rot_mat_to_rot_6d(rot_mat)
 
 def convert_abs_action(action, proprio):
     '''

@@ -3,6 +3,12 @@ import time
 from dataclasses import dataclass
 from loguru import logger
 
+try:
+    import pyroki as pk
+except Exception as e:
+    print(f"Error importing pyroki: {e}, Please run:\n\ngit clone https://github.com/chungmin99/pyroki.git\ncd pyroki\npip install -e .")
+    exit()
+
 import jax
 import jax.numpy as jnp
 import jaxlie
@@ -22,12 +28,11 @@ except ImportError:
     print("[INFO] Will be changed to official repo once YAM and RBY1 are added and released to upstream")
     exit()
 
-import pyroki as pk
 import os
 from pathlib import Path
 
 # Import the solve_ik function from pyroki_snippets  
-from xdof.pyroki.pyroki_snippets import solve_ik_with_multiple_targets
+# from pyroki_snippets import solve_ik_with_multiple_targets
 
 @dataclass
 class TransformHandle:
@@ -63,7 +68,12 @@ class YAMSBaseInterface:
             self.server = server if server is not None else viser.ViserServer()
         
         # Load robot description using PyRoki for both arms
-        self.urdf = load_robot_description("yam_description")
+        try:
+            self.urdf = load_robot_description("yam_description")
+        except Exception as e:
+            print(f"Error loading YAM robot description: {e}, Please run:\n\npip uninstall robot_descriptions.py\npip install git+https://github.com/uynitsuj/robot_descriptions.py.git")
+            exit()
+        
         self.robot_left = pk.Robot.from_urdf(self.urdf)
         self.robot_right = pk.Robot.from_urdf(self.urdf)
         
@@ -284,8 +294,15 @@ class YAMSBaseInterface:
             self.transform_handles['right'].frame.position = onp.array(T_target_world_right.translation())
             self.transform_handles['right'].frame.wxyz = onp.array(T_target_world_right.rotation().wxyz)
             
-    def solve_ik(self, target_positions=None, target_wxyzs=None):
-        """Solve inverse kinematics for both YAM arms using PyRoki."""
+    def solve_ik(self, target_positions=None, target_wxyzs=None, coordinate_frame: Literal["base", "world"] = "base"):
+        """
+        Solve inverse kinematics for both YAM arms using PyRoki.
+        
+        Args:
+            target_positions: Target positions for both arms [left_pos, right_pos] or single position for both
+            target_wxyzs: Target orientations (wxyz quaternions) for both arms [left_wxyz, right_wxyz] or single for both  
+            coordinate_frame: "base" for targets relative to each robot base, "world" for world coordinates
+        """
         if not self.minimal and hasattr(self, 'transform_handles'):
             # Get target poses from transform controls with TCP offset
             use_tcp_offset = getattr(self.use_tcp_offset_handle, 'value', True) if hasattr(self, 'use_tcp_offset_handle') else True
@@ -336,6 +353,45 @@ class YAMSBaseInterface:
             left_target_wxyz = onp.array([1.0, 0.0, 0.0, 0.0])
             right_target_position = onp.array([0.3, 0.0, 0.4])
             right_target_wxyz = onp.array([1.0, 0.0, 0.0, 0.0])
+        else:
+            # Process provided targets
+            if isinstance(target_positions, (list, tuple)) and len(target_positions) == 2:
+                left_target_position = onp.array(target_positions[0])
+                right_target_position = onp.array(target_positions[1])
+            else:
+                # Single target for both arms
+                left_target_position = onp.array(target_positions)
+                right_target_position = onp.array(target_positions)
+            
+            if isinstance(target_wxyzs, (list, tuple)) and len(target_wxyzs) == 2:
+                left_target_wxyz = onp.array(target_wxyzs[0])
+                right_target_wxyz = onp.array(target_wxyzs[1])
+            else:
+                # Single orientation for both arms
+                left_target_wxyz = onp.array(target_wxyzs)
+                right_target_wxyz = onp.array(target_wxyzs)
+                
+        # Transform targets from world to base coordinates if needed
+        if coordinate_frame == "world":
+            # Transform world targets to base frame coordinates
+            left_world_pose = jaxlie.SE3.from_rotation_and_translation(
+                jaxlie.SO3.from_quaternion_xyzw(onp.roll(left_target_wxyz, -1)),
+                left_target_position
+            )
+            right_world_pose = jaxlie.SE3.from_rotation_and_translation(
+                jaxlie.SO3.from_quaternion_xyzw(onp.roll(right_target_wxyz, -1)),
+                right_target_position
+            )
+            
+            # Transform to base coordinates
+            left_base_pose = self.base_pose_left.inverse() @ left_world_pose
+            right_base_pose = self.base_pose_right.inverse() @ right_world_pose
+            
+            # Extract position and orientation
+            left_target_position = onp.array(left_base_pose.translation())
+            left_target_wxyz = onp.array(left_base_pose.rotation().wxyz)
+            right_target_position = onp.array(right_base_pose.translation())
+            right_target_wxyz = onp.array(right_base_pose.rotation().wxyz)
         
         # Solve IK for left arm
         timing_start_left = False
@@ -405,16 +461,18 @@ class YAMSBaseInterface:
         print(f"Total joints: {len(joint_names_reversed)}")
         return joint_names_reversed
     
-    def get_end_effector_poses(self, target_link_names: Optional[List[str]] = None) -> Tuple[jaxlie.SE3, jaxlie.SE3]:
+    def get_end_effector_poses(self, target_link_names: Optional[List[str]] = None, 
+                             coordinate_frame: Literal["base", "world"] = "world") -> Tuple[jaxlie.SE3, jaxlie.SE3]:
         """
-        Compute forward kinematics and return world poses of end effectors for both arms.
+        Compute forward kinematics and return poses of end effectors for both arms.
         
         Args:
             target_link_names: List of target link names [left_target, right_target]. 
                               If None, uses self.target_names or defaults to last link.
+            coordinate_frame: "base" for poses relative to each robot base, "world" for world coordinates
         
         Returns:
-            Tuple of (left_ee_pose, right_ee_pose) in world coordinates
+            Tuple of (left_ee_pose, right_ee_pose) in requested coordinate frame
         """
         # Determine target link names
         if target_link_names is None:
@@ -432,17 +490,25 @@ class YAMSBaseInterface:
         # Left arm FK
         left_link_idx = self.robot_left.links.names.index(left_target)
         link_poses_left = self.robot_left.forward_kinematics(jnp.array(self.joints_left))
-        T_world_left_ee = self.base_pose_left @ jaxlie.SE3(link_poses_left[left_link_idx])
+        T_base_left_ee = jaxlie.SE3(link_poses_left[left_link_idx])
         
         # Right arm FK  
         right_link_idx = self.robot_right.links.names.index(right_target)
         link_poses_right = self.robot_right.forward_kinematics(jnp.array(self.joints_right))
-        T_world_right_ee = self.base_pose_right @ jaxlie.SE3(link_poses_right[right_link_idx])
+        T_base_right_ee = jaxlie.SE3(link_poses_right[right_link_idx])
         
-        return T_world_left_ee, T_world_right_ee
+        if coordinate_frame == "world":
+            # Transform to world coordinates
+            T_world_left_ee = self.base_pose_left @ T_base_left_ee
+            T_world_right_ee = self.base_pose_right @ T_base_right_ee
+            return T_world_left_ee, T_world_right_ee
+        else:  # coordinate_frame == "base"
+            # Return poses relative to each robot base
+            return T_base_left_ee, T_base_right_ee
         
     def solve_fk(self, left_joints: onp.ndarray, right_joints: onp.ndarray, 
-                                 target_link_names: Optional[List[str]] = None) -> Tuple[jaxlie.SE3, jaxlie.SE3]:
+                 target_link_names: Optional[List[str]] = None,
+                 coordinate_frame: Literal["base", "world"] = "world") -> Tuple[jaxlie.SE3, jaxlie.SE3]:
         """
         Compute forward kinematics for given joint configurations.
         
@@ -451,10 +517,12 @@ class YAMSBaseInterface:
             right_joints: Joint angles for right arm (will be flipped internally for YAM)
             target_link_names: List of target link names [left_target, right_target].
                               If None, uses self.target_names or defaults to last link.
+            coordinate_frame: "base" for poses relative to each robot base, "world" for world coordinates
         
         Returns:
-            Tuple of (left_ee_pose, right_ee_pose) in world coordinates
+            Tuple of (left_ee_pose, right_ee_pose) in requested coordinate frame
         """
+        has_batch_axis = len(left_joints.shape) > 1
         # Flip joints for YAM robot configuration
         left_joints_flipped = onp.flip(left_joints, axis=0)
         right_joints_flipped = onp.flip(right_joints, axis=0)
@@ -475,14 +543,28 @@ class YAMSBaseInterface:
         # Left arm FK
         left_link_idx = self.robot_left.links.names.index(left_target)
         link_poses_left = self.robot_left.forward_kinematics(jnp.array(left_joints_flipped))
-        T_world_left_ee = self.base_pose_left @ jaxlie.SE3(link_poses_left[left_link_idx])
+        if has_batch_axis:
+            T_base_left_ee = jaxlie.SE3(link_poses_left[:, left_link_idx])
+        else:   
+            T_base_left_ee = jaxlie.SE3(link_poses_left[left_link_idx])
         
         # Right arm FK
         right_link_idx = self.robot_right.links.names.index(right_target)
         link_poses_right = self.robot_right.forward_kinematics(jnp.array(right_joints_flipped))
-        T_world_right_ee = self.base_pose_right @ jaxlie.SE3(link_poses_right[right_link_idx])
-        
-        return T_world_left_ee, T_world_right_ee
+        if has_batch_axis:
+            T_base_right_ee = jaxlie.SE3(link_poses_right[:, right_link_idx])
+        else:
+            T_base_right_ee = jaxlie.SE3(link_poses_right[right_link_idx])
+
+
+        if coordinate_frame == "world":
+            # Transform to world coordinates
+            T_world_left_ee = self.base_pose_left @ T_base_left_ee
+            T_world_right_ee = self.base_pose_right @ T_base_right_ee
+            return T_world_left_ee, T_world_right_ee
+        else:  # coordinate_frame == "base"
+            # Return poses relative to each robot base
+            return T_base_left_ee, T_base_right_ee
 
     def run(self):
         """Main run loop."""
@@ -501,6 +583,145 @@ class YAMSBaseInterface:
         if not self.minimal:
             self.urdf_vis_left.update_cfg(onp.array(self.joints_left))
             self.urdf_vis_right.update_cfg(onp.array(self.joints_right))
+    
+    # Convenience methods for unified interface
+    def solve_ik_world(self, target_positions, target_wxyzs=None):
+        """Convenience method for IK with world coordinate targets."""
+        return self.solve_ik(target_positions, target_wxyzs, coordinate_frame="world")
+    
+    def solve_ik_base(self, target_positions, target_wxyzs=None):
+        """Convenience method for IK with base coordinate targets."""
+        return self.solve_ik(target_positions, target_wxyzs, coordinate_frame="base")
+    
+    def solve_fk_world(self, left_joints, right_joints, target_link_names=None):
+        """Convenience method for FK returning world coordinates."""
+        return self.solve_fk(left_joints, right_joints, target_link_names, coordinate_frame="world")
+    
+    def solve_fk_base(self, left_joints, right_joints, target_link_names=None):
+        """Convenience method for FK returning base coordinates."""
+        return self.solve_fk(left_joints, right_joints, target_link_names, coordinate_frame="base")
+
+
+"""
+Solves IK problem using pyroki.
+"""
+
+from typing import Sequence
+
+import jax
+import jax.numpy as jnp
+import jax_dataclasses as jdc
+import jaxlie
+import jaxls
+import numpy as onp
+import pyroki as pk
+from jax import Array
+from jaxls import Cost, Var, VarValues
+
+
+@Cost.create_factory
+def limit_velocity_cost(
+    vals: VarValues,
+    robot: pk.Robot,
+    joint_var: Var[Array],
+    prev_cfg: Array,
+    dt: float,
+    weight: Array | float,
+) -> Array:
+    """Computes the residual penalizing joint velocity limit violations."""
+    joint_vel = (vals[joint_var] - prev_cfg) / dt
+    residual = jnp.maximum(0.0, jnp.abs(joint_vel) - robot.joints.velocity_limits)
+    return (residual * weight).flatten()
+
+
+def solve_ik_with_multiple_targets(
+    robot: pk.Robot,
+    target_link_names: Sequence[str],
+    target_wxyzs: onp.ndarray,
+    target_positions: onp.ndarray,
+    prev_cfg: onp.ndarray,
+) -> onp.ndarray:
+    """
+    Solves the basic IK problem for a robot.
+
+    Args:
+        robot: PyRoKi Robot.
+        target_link_names: Sequence[str]. List of link names to be controlled.
+        target_wxyzs: onp.ndarray. Shape: (num_targets, 4). Target orientations.
+        target_positions: onp.ndarray. Shape: (num_targets, 3). Target positions.
+
+    Returns:
+        cfg: onp.ndarray. Shape: (robot.joint.actuated_count,).
+    """
+    num_targets = len(target_link_names)
+    assert target_positions.shape == (num_targets, 3)
+    assert target_wxyzs.shape == (num_targets, 4)
+    target_link_indices = [robot.links.names.index(name) for name in target_link_names]
+
+    cfg = _solve_ik_jax(
+        robot,
+        jnp.array(target_wxyzs),
+        jnp.array(target_positions),
+        jnp.array(target_link_indices),
+        jnp.array(prev_cfg),
+    )
+    assert cfg.shape == (robot.joints.num_actuated_joints,)
+
+    return onp.array(cfg)
+
+
+@jdc.jit
+def _solve_ik_jax(
+    robot: pk.Robot,
+    target_wxyz: jax.Array,
+    target_position: jax.Array,
+    target_joint_indices: jax.Array,
+    prev_cfg: jax.Array,
+) -> jax.Array:
+    JointVar = robot.joint_var_cls
+
+    # Get the batch axes for the variable through the target pose.
+    # Batch axes for the variables and cost terms (e.g., target pose) should be broadcastable!
+    target_pose = jaxlie.SE3.from_rotation_and_translation(jaxlie.SO3(target_wxyz), target_position)
+    batch_axes = target_pose.get_batch_axes()
+
+    factors = [
+        pk.costs.pose_cost_analytic_jac(
+            jax.tree.map(lambda x: x[None], robot),
+            JointVar(jnp.full(batch_axes, 0)),
+            target_pose,
+            target_joint_indices,
+            pos_weight=50.0,
+            ori_weight=10.0,
+        ),
+        pk.costs.rest_cost(
+            JointVar(0),
+            rest_pose=JointVar.default_factory(),
+            weight=1.0,
+        ),
+        pk.costs.limit_cost(
+            robot,
+            JointVar(0),
+            jnp.array([100.0] * robot.joints.num_joints),
+        ),
+        limit_velocity_cost(
+            robot,
+            JointVar(0),
+            prev_cfg,
+            0.01,  # dt
+            10.0,
+        ),
+    ]
+    sol = (
+        jaxls.LeastSquaresProblem(factors, [JointVar(0)])
+        .analyze()
+        .solve(
+            verbose=False,
+            linear_solver="dense_cholesky",
+            trust_region=jaxls.TrustRegionConfig(lambda_initial=10.0),
+        )
+    )
+    return sol[JointVar(0)]
 
 
 if __name__ == "__main__":

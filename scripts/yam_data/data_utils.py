@@ -8,7 +8,7 @@ import gc
 import json
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 try:
     from .video_utils import extract_video_frames_fast, resize_frames_vectorized
 except ImportError:
@@ -178,10 +178,6 @@ def process_images(images: Dict, seq_length: int, resize_size: int, skip_videos:
             if camera_key in images:
                 camera_frames = images[camera_key][:seq_length]
                 
-                # Skip stereo processing for now (commented out by user)
-                # if "top" in camera_key and camera_frames.shape[2] > camera_frames.shape[1]:
-                #     camera_frames = camera_frames[:, :, :camera_frames.shape[2]//2, :]
-                
                 # Batch resize all frames at once using fastest method
                 resized_frames = resize_frames_vectorized(camera_frames, resize_size)
                 processed_images[camera_key] = resized_frames
@@ -193,20 +189,33 @@ def calculate_actions(full_joint_state: np.ndarray, seq_length: int):
     joint_actions = joint_states.copy()  # absolute actions = joint state itself
     return joint_states, joint_actions
 
-# def calculate_actions(full_joint_state: np.ndarray, seq_length: int) -> tuple: # RELATIVE, DOES NOT SEEM TO WORK WELL
-#     """Calculate joint actions from joint states."""
-#     # Pre-calculate all actions at once (vectorized)
-#     joint_states = full_joint_state[:seq_length]  # Current states
-#     next_states = full_joint_state[1:seq_length+1]  # Next states
-    
-#     # Calculate delta actions vectorized
-#     joint_actions = next_states - joint_states
-    
-#     # For grippers, use absolute position instead of delta (vectorized)
-#     joint_actions[:, 6] = next_states[:, 6]    # left gripper absolute
-#     joint_actions[:, 13] = next_states[:, 13]  # right gripper absolute
-    
-#     return joint_states, joint_actions
+def calculate_actions_cartesian(full_joint_state: np.ndarray, seq_length: int, robot: Any):
+    from openpi.utils.matrix_utils import quat_to_rot_6d
+    joint_states = full_joint_state[:seq_length]
+
+    # joint states ordering: left_joint_pos, left_gripper_pos, right_joint_pos, right_gripper_pos
+    # T_left_ee, T_right_ee = robot.solve_fk_base(joint_states[:, :6], joint_states[:, 7:13]) # BUGGY, INTRODUCES A POSE DELAY
+    cartesian_states_list = []
+    cartesian_actions_list = []
+
+    for i in range(seq_length): # For some reason running batched FK is buggy -- camera lags behind pose so delay is introduced somewhere somehow
+        T_left_ee, T_right_ee = robot.solve_fk_base(joint_states[i, :6], joint_states[i, 7:13])
+        T_left_ee_6d = quat_to_rot_6d(T_left_ee.rotation().wxyz[None, :], scalar_first=True)
+        T_right_ee_6d = quat_to_rot_6d(T_right_ee.rotation().wxyz[None, :], scalar_first=True)
+        T_left_ee_pos = T_left_ee.wxyz_xyz[-3:].reshape(1, -1)
+        T_right_ee_pos = T_right_ee.wxyz_xyz[-3:].reshape(1, -1)
+        left_gripper_pos = joint_states[i, 6].reshape(-1, 1)
+        right_gripper_pos = joint_states[i, 13].reshape(-1, 1)
+        cartesian_states = np.concatenate([T_left_ee_6d, T_left_ee_pos, left_gripper_pos, T_right_ee_6d, T_right_ee_pos, right_gripper_pos], axis=1)[0]
+        cartesian_actions = cartesian_states.copy()  # absolute actions = state itself
+        cartesian_states_list.append(cartesian_states)
+        cartesian_actions_list.append(cartesian_actions)
+
+    cartesian_states = np.stack(cartesian_states_list, axis=0)
+    cartesian_actions = np.stack(cartesian_actions_list, axis=0)
+
+    return cartesian_states, cartesian_actions
+
 
 
 def create_frame_data(joint_states: np.ndarray, joint_actions: np.ndarray, 
