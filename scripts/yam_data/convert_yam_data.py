@@ -1068,6 +1068,15 @@ def main(cfg: YAMSConfig):
         print("No episodes found!")
         return
     
+    # Auto-disable hub push for large datasets to avoid rate limiting
+    auto_disabled_push = False
+    if len(episode_dirs) > 500 and cfg.push_to_hub:
+        print(f"⚠️  Large dataset detected ({len(episode_dirs)} episodes > 500)")
+        print("   Automatically disabling push_to_hub to avoid HuggingFace rate limiting")
+        print("   Manual upload instructions will be provided at the end")
+        cfg.push_to_hub = False
+        auto_disabled_push = True
+    
     # Prepare folders - include repo_name in path structure
     base_dir = cfg.output_dir / cfg.repo_name
     
@@ -1301,6 +1310,20 @@ def main(cfg: YAMSConfig):
         print(f"Total episodes: {len(all_combined_episodes)}")
     print(f"Total frames: {total_frames}")
     print(f"Total chunks: {actual_chunks}")
+    
+    # Provide manual upload instructions if push was auto-disabled
+    if auto_disabled_push:
+        print(f"\n🚀 MANUAL UPLOAD REQUIRED (Large Dataset)")
+        print(f"=" * 60)
+        print(f"Due to the large dataset size ({len(all_combined_episodes)} episodes),")
+        print(f"automatic hub push was disabled to avoid HuggingFace rate limiting.")
+        print(f"")
+        print(f"To upload your dataset manually, run:")
+        print(f"")
+        print(f"  huggingface-cli upload-large-folder {cfg.repo_name} {base_dir} --repo-type=dataset")
+        print(f"")
+        print(f"This will upload the dataset in chunks and handle rate limiting automatically.")
+        print(f"=" * 60)
 
     # Push to hub if enabled
     if cfg.push_to_hub and HAS_LEROBOT:
