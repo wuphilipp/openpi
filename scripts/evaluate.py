@@ -123,9 +123,9 @@ def evaluate_policy(
         gt_flat = actions_gt_np.flatten()[:min_samples]
         pred_flat = actions_pred_np.flatten()[:min_samples]
     else:
-        # Flatten for metric computation
-        gt_flat = actions_gt_np.reshape(-1)
-        pred_flat = actions_pred_np.reshape(-1)
+    # Flatten for metric computation
+    gt_flat = actions_gt_np.reshape(-1)
+    pred_flat = actions_pred_np.reshape(-1)
     
     metrics = {
         "mse": float(mean_squared_error(gt_flat, pred_flat)),
@@ -567,7 +567,7 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
         # Log progress
         if batch_idx % 5 == 0:
             logging.info(f"Batch {batch_idx}: MSE={metrics['mse']:.4f}, MAE={metrics['mae']:.4f}")
-
+    
     # Concatenate all results
     all_actions_gt = np.concatenate(all_actions_gt, axis=0)
     all_actions_pred = np.concatenate(all_actions_pred, axis=0)

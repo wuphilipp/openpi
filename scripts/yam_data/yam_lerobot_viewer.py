@@ -25,12 +25,13 @@ import jsonlines
 import jax.numpy as jnp
 
 # Import YAMS base interface (assuming it's available)
-try:
-    from yam_base import YAMSBaseInterface
-    HAS_YAMS_BASE = True
-except ImportError:
-    print("Warning: YAMS base interface not available.")
-    HAS_YAMS_BASE = False
+# try:
+from yam_base import YAMSBaseInterface
+#     HAS_YAMS_BASE = True
+# except Exception as e:
+#     print(e)
+#     print("Warning: YAMS base interface not available.")
+#     HAS_YAMS_BASE = False
 
 
 class YAMSLeRobotViewer:
@@ -66,11 +67,11 @@ class YAMSLeRobotViewer:
         self.viser_server = viser.ViserServer()
         
         # Initialize YAMS base interface if available
-        if HAS_YAMS_BASE:
-            self.yams_base_interface = YAMSBaseInterface(server=self.viser_server, minimal=True)
-        else:
-            self.yams_base_interface = None
-            print("Warning: YAMS base interface not available - robot visualization disabled")
+        # if HAS_YAMS_BASE:
+        self.yams_base_interface = YAMSBaseInterface(server=self.viser_server, minimal=True)
+        # else:
+        #     self.yams_base_interface = None
+        #     print("Warning: YAMS base interface not available - robot visualization disabled")
         
         # Load first episode
         self._load_episode_data(self.current_episode_idx)
@@ -522,7 +523,7 @@ class YAMSLeRobotViewer:
 
 
 def main(
-    dataset_path: str = "/home/justinyu/nfs_us/justinyu/yam_lerobot_datasets/uynitsuj/yam_bimanual_load_dishes",
+    dataset_path: str = "/home/justinyu/nfs_us/justinyu/yam_lerobot_datasets/uynitsuj/yam_bimanual_load_dishes_absolute",
 ):
     """
     Main function for YAMS LeRobot trajectory viewer.
