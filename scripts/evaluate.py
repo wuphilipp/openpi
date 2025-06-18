@@ -22,6 +22,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 import tqdm
 import pandas as pd
 from pathlib import Path
+from PIL import Image
 
 import openpi.models.model as _model
 from openpi.policies import policy as _policy
@@ -35,6 +36,10 @@ import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
+import orbax.checkpoint as ocp
+import torch
+import torch.utils.data
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
 
 def init_logging():
@@ -92,43 +97,23 @@ def evaluate_policy(
     # Convert observation to the format expected by policy
     # The observation is already structured properly from the data loader
     
-    # Get the first image key to determine batch size
-    first_image_key = next(iter(observation.images.keys()))
-    batch_size = observation.images[first_image_key].shape[0]
+    # IMPORTANT: The data loader has already applied the YAM input transform,
+    # so we need to call the model directly rather than going through policy.infer()
+    # which would try to apply the input transform again
     
-    # Get policy predictions for the batch
-    actions_pred_list = []
-    for i in range(batch_size):
-        # Extract single observation from batch
-        single_obs_images = {key: jnp.array(value[i]) for key, value in observation.images.items()}
-        single_obs_image_masks = {key: jnp.array(value[i]) for key, value in observation.image_masks.items()}
-        single_obs_state = jnp.array(observation.state[i])
-        
-        # Create single observation
-        single_obs = _model.Observation(
-            images=single_obs_images,
-            image_masks=single_obs_image_masks,
-            state=single_obs_state,
-            tokenized_prompt=jnp.array(observation.tokenized_prompt[i]) if observation.tokenized_prompt is not None else None,
-            tokenized_prompt_mask=jnp.array(observation.tokenized_prompt_mask[i]) if observation.tokenized_prompt_mask is not None else None,
-            token_ar_mask=jnp.array(observation.token_ar_mask[i]) if observation.token_ar_mask is not None else None,
-            token_loss_mask=jnp.array(observation.token_loss_mask[i]) if observation.token_loss_mask is not None else None,
-        )
-        
-        # Get policy prediction using infer method
-        # Convert structured observation back to dictionary format that policy expects
-        single_obs_dict = single_obs.to_dict()
-        
-        result = policy.infer(single_obs_dict)
-        action_pred = result['actions']  # Extract actions from result
-        actions_pred_list.append(action_pred)
-    
-    # Stack predictions back into batch format
-    actions_pred = jnp.stack(actions_pred_list, axis=0)
+    # Apply the model's sample_actions method directly on the full batch
+    actions_pred = policy._sample_actions(rng, observation, **policy._sample_kwargs)
     
     # Compute metrics
     actions_gt_np = np.array(actions_gt)
     actions_pred_np = np.array(actions_pred)
+    
+    # For YAM, focus on the first 14 dimensions (actual DOF), ignore padding
+    if actions_gt_np.shape[-1] == 32 and actions_pred_np.shape[-1] == 32:
+        # This is likely YAM with 32-dim padding - use only first 14 dims for metrics
+        logging.info("Using first 14 dimensions for metrics computation (YAM DOF)")
+        actions_gt_np = actions_gt_np[:, :, :14]
+        actions_pred_np = actions_pred_np[:, :, :14]
     
     # Handle shape mismatch if needed
     if actions_gt_np.shape != actions_pred_np.shape:
@@ -158,14 +143,21 @@ def plot_action_comparison(
     save_path: str,
     action_names: list[str] | None = None,
     sample_indices: list[int] | None = None,
+    action_stats: dict | None = None,
 ):
     """Create comprehensive plots comparing ground truth vs predicted actions."""
     
     batch_size, action_horizon, gt_action_dim = actions_gt.shape
     pred_action_dim = actions_pred.shape[2]
     
-    # Use the smaller action dimension for plotting
-    plot_action_dim = min(gt_action_dim, pred_action_dim)
+    # Determine plot dimensions, excluding padding for YAM data
+    if action_names and len(action_names) >= 14 and any('Pad_' in name for name in action_names[14:]):
+        # This is YAM with padding - only use first 14 dimensions
+        plot_action_dim = 14
+        logging.info(f"YAM detected: Plotting only first {plot_action_dim} dimensions for action comparison (excluding padding)")
+    else:
+        # Use the smaller action dimension for plotting
+        plot_action_dim = min(gt_action_dim, pred_action_dim)
     
     if action_names is None:
         action_names = [f"Action_{i}" for i in range(plot_action_dim)]
@@ -192,6 +184,34 @@ def plot_action_comparison(
             ax.plot(time_steps, actions_gt[sample_idx, :, j], 'b-', label='Ground Truth', linewidth=2)
             ax.plot(time_steps, actions_pred[sample_idx, :, j], 'r--', label='Predicted', linewidth=2)
             
+            # Set y-axis limits based on action statistics if available
+            if action_stats is not None and 'actions' in action_stats:
+                if j < len(action_stats['actions']['min']) and j < len(action_stats['actions']['max']):
+                    y_min = float(action_stats['actions']['min'][j])
+                    y_max = float(action_stats['actions']['max'][j])
+                    # Add small margin (5% of range)
+                    y_range = y_max - y_min
+                    margin = y_range * 0.05
+                    ax.set_ylim(y_min - margin, y_max + margin)
+                    
+                    # Debug logging for first few plots
+                    if i == 0 and j < 3:
+                        logging.info(f"Setting y-axis for {action_names[j]} (dim {j}): [{y_min:.3f}, {y_max:.3f}] + margin")
+                else:
+                    if i == 0 and j < 3:
+                        logging.warning(f"Action stats missing for dimension {j} (action: {action_names[j]})")
+            else:
+                if i == 0 and j < 3:
+                    if action_stats is None:
+                        logging.warning(f"No action_stats provided for {action_names[j]}")
+                    elif 'actions' not in action_stats:
+                        logging.warning(f"No 'actions' key in action_stats. Available keys: {list(action_stats.keys())}")
+                        # Try alternative key names
+                        for alt_key in ['action', 'observation.actions', 'policy_actions']:
+                            if alt_key in action_stats:
+                                logging.info(f"Found alternative actions key: {alt_key}")
+                                break
+            
             ax.set_xlabel('Time Step')
             ax.set_ylabel('Action Value')
             ax.set_title(f'Sample {sample_idx} - {action_names[j]}')
@@ -214,8 +234,14 @@ def plot_error_heatmap(
     batch_size, action_horizon, gt_action_dim = actions_gt.shape
     pred_action_dim = actions_pred.shape[2]
     
-    # Use the smaller action dimension for error computation
-    plot_action_dim = min(gt_action_dim, pred_action_dim)
+    # Determine plot dimensions, excluding padding for YAM data
+    if action_names and len(action_names) >= 14 and any('Pad_' in name for name in action_names[14:]):
+        # This is YAM with padding - only use first 14 dimensions
+        plot_action_dim = 14
+        logging.info(f"YAM detected: Error heatmap using only first {plot_action_dim} dimensions (excluding padding)")
+    else:
+        # Use the smaller action dimension for error computation
+        plot_action_dim = min(gt_action_dim, pred_action_dim)
     
     if action_names is None:
         action_names = [f"Action_{i}" for i in range(plot_action_dim)]
@@ -233,7 +259,7 @@ def plot_error_heatmap(
     avg_errors = np.mean(errors, axis=0)  # Shape: (action_horizon, plot_action_dim)
     
     # Create heatmap
-    plt.figure(figsize=(max(8, plot_action_dim), max(6, action_horizon // 2)))
+    plt.figure(figsize=(max(16, plot_action_dim * 2.0), max(6, action_horizon // 3)))
     sns.heatmap(
         avg_errors.T,  # Transpose so actions are on y-axis
         annot=True,
@@ -255,11 +281,19 @@ def plot_error_distribution(
     actions_gt: np.ndarray,
     actions_pred: np.ndarray,
     save_path: str,
+    action_names: list[str] | None = None,
 ):
     """Plot distribution of prediction errors."""
     
-    # Handle dimension mismatch - use only the overlapping dimensions
-    min_action_dim = min(actions_gt.shape[-1], actions_pred.shape[-1])
+    # For YAM, only use the first 14 dimensions (actual DOF), ignore padding
+    if action_names and len(action_names) >= 14 and any('Pad_' in name for name in action_names[14:]):
+        # This is YAM with padding - only use first 14 dimensions
+        min_action_dim = 14
+        logging.info(f"YAM detected: Using only first {min_action_dim} dimensions for error analysis (excluding padding)")
+    else:
+        # Handle dimension mismatch - use only the overlapping dimensions
+        min_action_dim = min(actions_gt.shape[-1], actions_pred.shape[-1])
+    
     actions_gt_trimmed = actions_gt[:, :, :min_action_dim]
     actions_pred_trimmed = actions_pred[:, :, :min_action_dim]
     
@@ -280,15 +314,20 @@ def plot_error_distribution(
     
     # Box plot of absolute errors by action dimension
     abs_errors_by_dim = []
+    action_labels = []
     for i in range(min_action_dim):
         abs_errors_by_dim.append(np.abs(actions_pred_trimmed[:, :, i] - actions_gt_trimmed[:, :, i]).flatten())
+        if action_names and i < len(action_names):
+            action_labels.append(action_names[i])
+        else:
+            action_labels.append(f'A{i}')
     
     ax2.boxplot(abs_errors_by_dim, positions=range(min_action_dim))
     ax2.set_xlabel('Action Dimension')
     ax2.set_ylabel('Absolute Error')
-    ax2.set_title(f'Error Distribution by Action Dimension\n({min_action_dim} dims)')
+    ax2.set_title(f'Error Distribution by Action Dimension\n({min_action_dim} meaningful dims)')
     ax2.set_xticks(range(min_action_dim))
-    ax2.set_xticklabels([f'A{i}' for i in range(min_action_dim)])
+    ax2.set_xticklabels(action_labels, rotation=45, ha='right')
     ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -377,6 +416,146 @@ def patch_video_loading():
 patch_video_loading()
 
 
+def load_dataset_stats(config: _config.TrainConfig, checkpoint_path: str = None, checkpoint_step: int = None) -> dict | None:
+    """Load dataset statistics from the config system."""
+    try:
+        import json
+        from pathlib import Path
+        
+        # First, try to get the norm_stats from the data config (same way the config system loads it)
+        try:
+            data_config = config.data.create(config.assets_dirs, config.model)
+            if hasattr(data_config, 'norm_stats') and data_config.norm_stats is not None:
+                norm_stats_path = Path(data_config.norm_stats)
+                logging.info(f"Trying to load norm stats from config path: {norm_stats_path}")
+                
+                if norm_stats_path.exists():
+                    with open(norm_stats_path, 'r') as f:
+                        norm_data = json.load(f)
+                    
+                    if 'norm_stats' in norm_data and 'actions' in norm_data['norm_stats']:
+                        actions_norm = norm_data['norm_stats']['actions']
+                        logging.info(f"Successfully loaded norm stats from {norm_stats_path}")
+                        logging.info(f"Actions norm stats keys: {list(actions_norm.keys())}")
+                        
+                        # Convert norm stats to min/max format for plotting
+                        if 'q01' in actions_norm and 'q99' in actions_norm:
+                            converted_stats = {
+                                'actions': {
+                                    'min': actions_norm['q01'],
+                                    'max': actions_norm['q99'],
+                                    'mean': actions_norm.get('mean', []),
+                                    'std': actions_norm.get('std', [])
+                                }
+                            }
+                            logging.info(f"Converted quantiles (q01/q99) to min/max format")
+                            logging.info(f"Actions min (q01): {converted_stats['actions']['min'][:5] if len(converted_stats['actions']['min']) > 5 else converted_stats['actions']['min']}")
+                            logging.info(f"Actions max (q99): {converted_stats['actions']['max'][:5] if len(converted_stats['actions']['max']) > 5 else converted_stats['actions']['max']}")
+                            return converted_stats
+                        elif 'min' in actions_norm and 'max' in actions_norm:
+                            # Already in min/max format
+                            converted_stats = {'actions': actions_norm}
+                            logging.info(f"Found actions stats in min/max format")
+                            logging.info(f"Actions min: {converted_stats['actions']['min'][:5] if len(converted_stats['actions']['min']) > 5 else converted_stats['actions']['min']}")
+                            logging.info(f"Actions max: {converted_stats['actions']['max'][:5] if len(converted_stats['actions']['max']) > 5 else converted_stats['actions']['max']}")
+                            return converted_stats
+                        else:
+                            logging.warning(f"Norm stats found but missing required keys (q01/q99 or min/max): {list(actions_norm.keys())}")
+                    else:
+                        logging.warning(f"Norm stats file exists but missing 'norm_stats.actions' structure")
+                else:
+                    logging.warning(f"Norm stats path from config does not exist: {norm_stats_path}")
+        except Exception as e:
+            logging.debug(f"Could not load norm stats from config path: {e}")
+        
+        # Fallback: Try multiple possible locations for norm_stats.json
+        logging.info("Trying fallback locations for norm_stats.json...")
+        possible_paths = []
+        
+        # Check in common asset locations
+        if hasattr(config, 'assets_dirs'):
+            # Handle both single path and list of paths
+            assets_dirs = config.assets_dirs
+            if not isinstance(assets_dirs, (list, tuple)):
+                assets_dirs = [assets_dirs]
+            
+            for assets_dir in assets_dirs:
+                norm_path = Path(assets_dir) / config.data.repo_id / "norm_stats.json"
+                if norm_path.exists():
+                    possible_paths.append(norm_path)
+                    logging.info(f"Found potential norm_stats at: {norm_path}")
+        
+        # Check in checkpoint directory assets (common for trained models)
+        if checkpoint_path is not None:
+            # Construct the same path as load_trained_policy does
+            if checkpoint_step is not None:
+                actual_checkpoint_path = f"{checkpoint_path}/{checkpoint_step}"
+            else:
+                actual_checkpoint_path = checkpoint_path
+            
+            checkpoint_assets_path = Path(actual_checkpoint_path) / "assets" / config.data.repo_id / "norm_stats.json"
+            if checkpoint_assets_path.exists():
+                possible_paths.append(checkpoint_assets_path)
+                logging.info(f"Found potential norm_stats at checkpoint assets: {checkpoint_assets_path}")
+        
+        # Try to create a minimal dataset instance to access its root
+        try:
+            dataset = LeRobotDataset(config.data.repo_id)
+            if hasattr(dataset, 'root') and dataset.root is not None:
+                norm_path = Path(dataset.root) / "norm_stats.json"
+                if norm_path.exists():
+                    possible_paths.append(norm_path)
+                    logging.info(f"Found potential norm_stats at dataset root: {norm_path}")
+        except Exception as e:
+            logging.debug(f"Could not access dataset root: {e}")
+        
+        for norm_stats_path in possible_paths:
+            try:
+                logging.info(f"Trying to load norm stats from: {norm_stats_path}")
+                with open(norm_stats_path, 'r') as f:
+                    norm_data = json.load(f)
+                
+                if 'norm_stats' in norm_data and 'actions' in norm_data['norm_stats']:
+                    actions_norm = norm_data['norm_stats']['actions']
+                    logging.info(f"Successfully loaded norm stats from {norm_stats_path}")
+                    logging.info(f"Actions norm stats keys: {list(actions_norm.keys())}")
+                    
+                    # Convert norm stats to min/max format for plotting
+                    if 'q01' in actions_norm and 'q99' in actions_norm:
+                        converted_stats = {
+                            'actions': {
+                                'min': actions_norm['q01'],
+                                'max': actions_norm['q99'],
+                                'mean': actions_norm.get('mean', []),
+                                'std': actions_norm.get('std', [])
+                            }
+                        }
+                        logging.info(f"Converted quantiles (q01/q99) to min/max format")
+                        logging.info(f"Actions min (q01): {converted_stats['actions']['min'][:5] if len(converted_stats['actions']['min']) > 5 else converted_stats['actions']['min']}")
+                        logging.info(f"Actions max (q99): {converted_stats['actions']['max'][:5] if len(converted_stats['actions']['max']) > 5 else converted_stats['actions']['max']}")
+                        return converted_stats
+                    elif 'min' in actions_norm and 'max' in actions_norm:
+                        # Already in min/max format
+                        converted_stats = {'actions': actions_norm}
+                        logging.info(f"Found actions stats in min/max format")
+                        return converted_stats
+                    else:
+                        logging.warning(f"Norm stats found but missing required keys (q01/q99 or min/max): {list(actions_norm.keys())}")
+                else:
+                    logging.warning(f"Norm stats file exists but missing 'norm_stats.actions' structure in {norm_stats_path}")
+                    
+            except Exception as e:
+                logging.debug(f"Could not load norm stats from {norm_stats_path}: {e}")
+                continue
+        
+        logging.warning("Could not find dataset statistics in any expected location")
+        return None
+        
+    except Exception as e:
+        logging.warning(f"Failed to load dataset statistics: {e}")
+        return None
+
+
 def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_step: int | None = None, checkpoint_dir: str | None = None):
     """Main evaluation function."""
     
@@ -399,17 +578,27 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
     mesh = sharding.make_mesh(config.fsdp_devices)
     data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
     
+    # Apply video backend patch
+    logging.info("Applying video backend patches...")
+    patch_video_loading()
+    
     # Force video backend to pyav in config
     if hasattr(config.data, 'video_backend'):
         config.data.video_backend = "pyav"
+    
+    # We'll skip norm stats loading in the data loader and handle statistics loading separately for plots
+    
+    # Debug: Print dataset configuration
+    logging.info(f"Dataset repo_id: {config.data.repo_id}")
+    logging.info(f"Dataset config: {config.data}")
     
     data_loader = _data_loader.create_data_loader(
         config,
         sharding=data_sharding,
         num_workers=config.num_workers,
-        shuffle=False,  # Don't shuffle for evaluation
+        shuffle=True, 
         num_batches=num_eval_batches,
-        skip_norm_stats=True,  # Skip normalization stats - use those from the trained model
+        skip_norm_stats=True,  # Skip norm stats loading for evaluation
     )
     
     # Setup evaluation
@@ -426,6 +615,130 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
         # Get batch
         observation, actions_gt = next(data_iter)
         
+        # Debug: Print observation info for first batch
+        if batch_idx == 0:
+            logging.info("=== OBSERVATION INFO (First Batch) ===")
+            
+            if hasattr(observation, 'images'):
+                logging.info(f"Image keys: {list(observation.images.keys())}")
+                
+                # Create directory for saving sample images
+                sample_images_dir = eval_output_dir / "sample_images"
+                sample_images_dir.mkdir(parents=True, exist_ok=True)
+                
+                for key, img in observation.images.items():
+                    img_array = np.array(img)
+                    logging.info(f"Image '{key}': shape={img_array.shape}, range=[{img_array.min():.2f}, {img_array.max():.2f}]")
+                    
+                    # Check for duplicate images in the batch
+                    if img_array.shape[0] >= 3:
+                        img0 = img_array[0]
+                        img1 = img_array[1] 
+                        img2 = img_array[2]
+                        
+                        # Compare images using MSE
+                        mse_01 = np.mean((img0 - img1) ** 2)
+                        mse_02 = np.mean((img0 - img2) ** 2)
+                        mse_12 = np.mean((img1 - img2) ** 2)
+                        
+                        logging.info(f"Image '{key}' similarity check:")
+                        logging.info(f"  MSE between sample 0 and 1: {mse_01:.6f}")
+                        logging.info(f"  MSE between sample 0 and 2: {mse_02:.6f}")  
+                        logging.info(f"  MSE between sample 1 and 2: {mse_12:.6f}")
+                        
+                        if mse_01 < 1e-10 and mse_02 < 1e-10:
+                            logging.warning(f"  ⚠️  Images appear to be IDENTICAL (likely duplicate data)")
+                        elif mse_01 < 1e-6 and mse_02 < 1e-6:
+                            logging.warning(f"  ⚠️  Images appear to be nearly identical (very similar)")
+                        else:
+                            logging.info(f"  ✅ Images appear to be different (normal)")
+                        
+                        # Save difference images to visualize the subtle differences
+                        if key == 'base_0_rgb':  # Only for base camera to avoid clutter
+                            diff_01 = np.abs(img0 - img1)
+                            diff_02 = np.abs(img0 - img2)
+                            
+                            # Amplify differences for visualization (scale by 10)
+                            diff_01_amplified = np.clip(diff_01 * 10, 0, 1)
+                            diff_02_amplified = np.clip(diff_02 * 10, 0, 1)
+                            
+                            # Convert to [0, 255] for saving
+                            diff_01_uint8 = (diff_01_amplified * 255).astype(np.uint8)
+                            diff_02_uint8 = (diff_02_amplified * 255).astype(np.uint8)
+                            
+                            # Save difference images
+                            diff_01_img = Image.fromarray(diff_01_uint8)
+                            diff_02_img = Image.fromarray(diff_02_uint8)
+                            
+                            diff_01_path = sample_images_dir / f"{key}_diff_0_vs_1_amplified.png"
+                            diff_02_path = sample_images_dir / f"{key}_diff_0_vs_2_amplified.png"
+                            
+                            diff_01_img.save(diff_01_path)
+                            diff_02_img.save(diff_02_path)
+                            
+                            logging.info(f"  💡 Saved amplified difference images:")
+                            logging.info(f"    - {diff_01_path}")
+                            logging.info(f"    - {diff_02_path}")
+                    
+                    # Save a few sample images from the batch for visual verification
+                    for sample_idx in range(min(3, img_array.shape[0])):  # Save first 3 samples
+                        sample_img = img_array[sample_idx]  # Shape: (224, 224, 3)
+                        
+                        # Convert from [-1, 1] back to [0, 255] for saving
+                        sample_img_uint8 = ((sample_img + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+                        
+                        # Save as PNG
+                        pil_img = Image.fromarray(sample_img_uint8)
+                        image_path = sample_images_dir / f"{key}_sample_{sample_idx}.png"
+                        pil_img.save(image_path)
+                
+                logging.info(f"Sample images saved to: {sample_images_dir}")
+                
+            if hasattr(observation, 'state'):
+                state_array = np.array(observation.state)
+                logging.info(f"State: shape={state_array.shape}")
+                
+                # Check if states are also duplicated
+                if state_array.shape[0] >= 3:
+                    state0 = state_array[0]
+                    state1 = state_array[1]
+                    state2 = state_array[2]
+                    
+                    state_mse_01 = np.mean((state0 - state1) ** 2)
+                    state_mse_02 = np.mean((state0 - state2) ** 2)
+                    
+                    logging.info(f"State similarity check:")
+                    logging.info(f"  MSE between sample 0 and 1: {state_mse_01:.6f}")
+                    logging.info(f"  MSE between sample 0 and 2: {state_mse_02:.6f}")
+                    
+                    if state_mse_01 < 1e-10 and state_mse_02 < 1e-10:
+                        logging.warning(f"  ⚠️  States appear to be IDENTICAL")
+                    else:
+                        logging.info(f"  ✅ States appear to be different")
+                
+            logging.info(f"Actions GT: shape={np.array(actions_gt).shape}")
+            
+            # Check actions for duplication too
+            actions_array = np.array(actions_gt)
+            if actions_array.shape[0] >= 3:
+                action0 = actions_array[0]
+                action1 = actions_array[1] 
+                action2 = actions_array[2]
+                
+                action_mse_01 = np.mean((action0 - action1) ** 2)
+                action_mse_02 = np.mean((action0 - action2) ** 2)
+                
+                logging.info(f"Action similarity check:")
+                logging.info(f"  MSE between sample 0 and 1: {action_mse_01:.6f}")
+                logging.info(f"  MSE between sample 0 and 2: {action_mse_02:.6f}")
+                
+                if action_mse_01 < 1e-10 and action_mse_02 < 1e-10:
+                    logging.warning(f"  ⚠️  Actions appear to be IDENTICAL")
+                else:
+                    logging.info(f"  ✅ Actions appear to be different")
+            
+            logging.info("==========================================")
+        
         # Run inference
         eval_rng = jax.random.fold_in(rng, batch_idx)
         actions_pred, metrics = evaluate_policy(policy, observation, actions_gt, eval_rng)
@@ -438,13 +751,21 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
         # Log progress
         if batch_idx % 5 == 0:
             logging.info(f"Batch {batch_idx}: MSE={metrics['mse']:.4f}, MAE={metrics['mae']:.4f}")
-
+    
     # Concatenate all results
     all_actions_gt = np.concatenate(all_actions_gt, axis=0)
     all_actions_pred = np.concatenate(all_actions_pred, axis=0)
     
     logging.info(f"Evaluation complete. Total samples: {all_actions_gt.shape[0]}")
     logging.info(f"Action shape: {all_actions_gt.shape}")
+    
+    # Load dataset statistics for proper y-axis scaling
+    logging.info("Loading dataset statistics for plot scaling...")
+    dataset_stats = load_dataset_stats(config, checkpoint_path, checkpoint_step)
+    if dataset_stats is not None:
+        logging.info("Successfully loaded dataset statistics")
+    else:
+        logging.warning("Could not load dataset statistics - plots will use auto-scaling")
     
     # Create visualizations
     logging.info("Creating visualizations...")
@@ -454,10 +775,13 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
     data_config = config.data.create(config.assets_dirs, config.model)
     if hasattr(config.data, 'repo_id') and config.data.repo_id:
         if 'yam' in config.data.repo_id.lower():
+            # YAM has 14 actual DOF but model uses 32-dim actions (padded)
             action_names = [
                 'L_Joint_0', 'L_Joint_1', 'L_Joint_2', 'L_Joint_3', 'L_Joint_4', 'L_Joint_5', 'L_Gripper',
                 'R_Joint_0', 'R_Joint_1', 'R_Joint_2', 'R_Joint_3', 'R_Joint_4', 'R_Joint_5', 'R_Gripper'
             ]
+            # Extend to 32 dimensions with padding names
+            action_names.extend([f'Pad_{i}' for i in range(14, 32)])
         elif 'xmi' in config.data.repo_id.lower():
             action_names = [
                 'L_Rot_0', 'L_Rot_1', 'L_Rot_2', 'L_Rot_3', 'L_Rot_4', 'L_Rot_5',
@@ -472,11 +796,16 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
             ]
     
     # Action comparison plots
+    logging.info(f"Creating action comparison plot...")
+    logging.info(f"GT actions shape: {all_actions_gt.shape}")
+    logging.info(f"Pred actions shape: {all_actions_pred.shape}")
+    
     plot_action_comparison(
         all_actions_gt,
         all_actions_pred,
         str(eval_output_dir / "action_comparison.png"),
         action_names=action_names,
+        action_stats=dataset_stats,
     )
     
     # Error heatmap
@@ -492,6 +821,7 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
         all_actions_gt,
         all_actions_pred,
         str(eval_output_dir / "error_distribution.png"),
+        action_names=action_names,
     )
     
     # Summary metrics

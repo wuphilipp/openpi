@@ -52,6 +52,7 @@ class YamInputs(transforms.DataTransformFn):
         # Get the state. We are padding from 14 to the model action dim.
         state = transforms.pad_to_dim(data["state"], self.action_dim)
 
+        # print(data.keys())
         base_image = _parse_image(data["top_camera-images-rgb"])
         left_wrist_image = _parse_image(data["left_camera-images-rgb"])
         right_wrist_image = _parse_image(data["right_camera-images-rgb"])

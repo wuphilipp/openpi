@@ -17,7 +17,7 @@ try:
 except ImportError:
     print("ImportError: robot_descriptions not found, for now:")
     print(
-        "pip install git+https://github.com/uynitsuj/robot_descriptions.py.git@e2502f3d4d8aa38d18b72527c5baae2b19a1182e"
+        "pip install git+https://github.com/uynitsuj/robot_descriptions.py.git"
     )
     print("[INFO] Will be changed to official repo once YAM and RBY1 are added and released to upstream")
     exit()

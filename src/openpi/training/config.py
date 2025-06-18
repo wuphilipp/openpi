@@ -753,7 +753,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi0_xmi_rby_low_mem_finetune",
-        model=pi0.Pi0Config(action_horizon=10, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotXmiRbyDataConfig(
             repo_id="uynitsuj/xmi_bimanual_testing",
             default_prompt="testing",
@@ -763,7 +763,7 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
-        freeze_filter=pi0.Pi0Config(action_horizon=10, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        freeze_filter=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         ema_decay=None,
     ),
@@ -773,7 +773,11 @@ _CONFIGS = [
         name="pi0_yam",
         model=pi0.Pi0Config(),
         data=LeRobotYamDataConfig(
+<<<<<<< HEAD
             repo_id="uynitsuj/yam_bimanual_load_dishes_full_absolute",
+=======
+            repo_id="uynitsuj/yam_bimanual_load_dishes_absolute",
+>>>>>>> 2dd9c5059ff0e6f99b8927bbe84ab6f0d28b70c0
             default_prompt="Load dishes into tabletop dishrack",
             base_config=DataConfig(
                 prompt_from_task=True,
@@ -786,7 +790,11 @@ _CONFIGS = [
         name="pi0_yam_low_mem_finetune",
         model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotYamDataConfig(
+<<<<<<< HEAD
             repo_id="uynitsuj/yam_bimanual_load_dishes_full_absolute",
+=======
+            repo_id="uynitsuj/yam_bimanual_load_dishes_absolute",
+>>>>>>> 2dd9c5059ff0e6f99b8927bbe84ab6f0d28b70c0
             default_prompt="Load dishes into tabletop dishrack",
             base_config=DataConfig(
                 prompt_from_task=True,
