@@ -123,9 +123,9 @@ def evaluate_policy(
         gt_flat = actions_gt_np.flatten()[:min_samples]
         pred_flat = actions_pred_np.flatten()[:min_samples]
     else:
-    # Flatten for metric computation
-    gt_flat = actions_gt_np.reshape(-1)
-    pred_flat = actions_pred_np.reshape(-1)
+        # Flatten for metric computation
+        gt_flat = actions_gt_np.reshape(-1)
+        pred_flat = actions_pred_np.reshape(-1)
     
     metrics = {
         "mse": float(mean_squared_error(gt_flat, pred_flat)),
@@ -143,14 +143,21 @@ def plot_action_comparison(
     save_path: str,
     action_names: list[str] | None = None,
     sample_indices: list[int] | None = None,
+    action_stats: dict | None = None,
 ):
     """Create comprehensive plots comparing ground truth vs predicted actions."""
     
     batch_size, action_horizon, gt_action_dim = actions_gt.shape
     pred_action_dim = actions_pred.shape[2]
     
-    # Use the smaller action dimension for plotting
-    plot_action_dim = min(gt_action_dim, pred_action_dim)
+    # Determine plot dimensions, excluding padding for YAM data
+    if action_names and len(action_names) >= 14 and any('Pad_' in name for name in action_names[14:]):
+        # This is YAM with padding - only use first 14 dimensions
+        plot_action_dim = 14
+        logging.info(f"YAM detected: Plotting only first {plot_action_dim} dimensions for action comparison (excluding padding)")
+    else:
+        # Use the smaller action dimension for plotting
+        plot_action_dim = min(gt_action_dim, pred_action_dim)
     
     if action_names is None:
         action_names = [f"Action_{i}" for i in range(plot_action_dim)]
@@ -177,6 +184,34 @@ def plot_action_comparison(
             ax.plot(time_steps, actions_gt[sample_idx, :, j], 'b-', label='Ground Truth', linewidth=2)
             ax.plot(time_steps, actions_pred[sample_idx, :, j], 'r--', label='Predicted', linewidth=2)
             
+            # Set y-axis limits based on action statistics if available
+            if action_stats is not None and 'actions' in action_stats:
+                if j < len(action_stats['actions']['min']) and j < len(action_stats['actions']['max']):
+                    y_min = float(action_stats['actions']['min'][j])
+                    y_max = float(action_stats['actions']['max'][j])
+                    # Add small margin (5% of range)
+                    y_range = y_max - y_min
+                    margin = y_range * 0.05
+                    ax.set_ylim(y_min - margin, y_max + margin)
+                    
+                    # Debug logging for first few plots
+                    if i == 0 and j < 3:
+                        logging.info(f"Setting y-axis for {action_names[j]} (dim {j}): [{y_min:.3f}, {y_max:.3f}] + margin")
+                else:
+                    if i == 0 and j < 3:
+                        logging.warning(f"Action stats missing for dimension {j} (action: {action_names[j]})")
+            else:
+                if i == 0 and j < 3:
+                    if action_stats is None:
+                        logging.warning(f"No action_stats provided for {action_names[j]}")
+                    elif 'actions' not in action_stats:
+                        logging.warning(f"No 'actions' key in action_stats. Available keys: {list(action_stats.keys())}")
+                        # Try alternative key names
+                        for alt_key in ['action', 'observation.actions', 'policy_actions']:
+                            if alt_key in action_stats:
+                                logging.info(f"Found alternative actions key: {alt_key}")
+                                break
+            
             ax.set_xlabel('Time Step')
             ax.set_ylabel('Action Value')
             ax.set_title(f'Sample {sample_idx} - {action_names[j]}')
@@ -199,8 +234,14 @@ def plot_error_heatmap(
     batch_size, action_horizon, gt_action_dim = actions_gt.shape
     pred_action_dim = actions_pred.shape[2]
     
-    # Use the smaller action dimension for error computation
-    plot_action_dim = min(gt_action_dim, pred_action_dim)
+    # Determine plot dimensions, excluding padding for YAM data
+    if action_names and len(action_names) >= 14 and any('Pad_' in name for name in action_names[14:]):
+        # This is YAM with padding - only use first 14 dimensions
+        plot_action_dim = 14
+        logging.info(f"YAM detected: Error heatmap using only first {plot_action_dim} dimensions (excluding padding)")
+    else:
+        # Use the smaller action dimension for error computation
+        plot_action_dim = min(gt_action_dim, pred_action_dim)
     
     if action_names is None:
         action_names = [f"Action_{i}" for i in range(plot_action_dim)]
@@ -218,7 +259,7 @@ def plot_error_heatmap(
     avg_errors = np.mean(errors, axis=0)  # Shape: (action_horizon, plot_action_dim)
     
     # Create heatmap
-    plt.figure(figsize=(max(8, plot_action_dim), max(6, action_horizon // 2)))
+    plt.figure(figsize=(max(16, plot_action_dim * 2.0), max(6, action_horizon // 3)))
     sns.heatmap(
         avg_errors.T,  # Transpose so actions are on y-axis
         annot=True,
@@ -375,6 +416,146 @@ def patch_video_loading():
 patch_video_loading()
 
 
+def load_dataset_stats(config: _config.TrainConfig, checkpoint_path: str = None, checkpoint_step: int = None) -> dict | None:
+    """Load dataset statistics from the config system."""
+    try:
+        import json
+        from pathlib import Path
+        
+        # First, try to get the norm_stats from the data config (same way the config system loads it)
+        try:
+            data_config = config.data.create(config.assets_dirs, config.model)
+            if hasattr(data_config, 'norm_stats') and data_config.norm_stats is not None:
+                norm_stats_path = Path(data_config.norm_stats)
+                logging.info(f"Trying to load norm stats from config path: {norm_stats_path}")
+                
+                if norm_stats_path.exists():
+                    with open(norm_stats_path, 'r') as f:
+                        norm_data = json.load(f)
+                    
+                    if 'norm_stats' in norm_data and 'actions' in norm_data['norm_stats']:
+                        actions_norm = norm_data['norm_stats']['actions']
+                        logging.info(f"Successfully loaded norm stats from {norm_stats_path}")
+                        logging.info(f"Actions norm stats keys: {list(actions_norm.keys())}")
+                        
+                        # Convert norm stats to min/max format for plotting
+                        if 'q01' in actions_norm and 'q99' in actions_norm:
+                            converted_stats = {
+                                'actions': {
+                                    'min': actions_norm['q01'],
+                                    'max': actions_norm['q99'],
+                                    'mean': actions_norm.get('mean', []),
+                                    'std': actions_norm.get('std', [])
+                                }
+                            }
+                            logging.info(f"Converted quantiles (q01/q99) to min/max format")
+                            logging.info(f"Actions min (q01): {converted_stats['actions']['min'][:5] if len(converted_stats['actions']['min']) > 5 else converted_stats['actions']['min']}")
+                            logging.info(f"Actions max (q99): {converted_stats['actions']['max'][:5] if len(converted_stats['actions']['max']) > 5 else converted_stats['actions']['max']}")
+                            return converted_stats
+                        elif 'min' in actions_norm and 'max' in actions_norm:
+                            # Already in min/max format
+                            converted_stats = {'actions': actions_norm}
+                            logging.info(f"Found actions stats in min/max format")
+                            logging.info(f"Actions min: {converted_stats['actions']['min'][:5] if len(converted_stats['actions']['min']) > 5 else converted_stats['actions']['min']}")
+                            logging.info(f"Actions max: {converted_stats['actions']['max'][:5] if len(converted_stats['actions']['max']) > 5 else converted_stats['actions']['max']}")
+                            return converted_stats
+                        else:
+                            logging.warning(f"Norm stats found but missing required keys (q01/q99 or min/max): {list(actions_norm.keys())}")
+                    else:
+                        logging.warning(f"Norm stats file exists but missing 'norm_stats.actions' structure")
+                else:
+                    logging.warning(f"Norm stats path from config does not exist: {norm_stats_path}")
+        except Exception as e:
+            logging.debug(f"Could not load norm stats from config path: {e}")
+        
+        # Fallback: Try multiple possible locations for norm_stats.json
+        logging.info("Trying fallback locations for norm_stats.json...")
+        possible_paths = []
+        
+        # Check in common asset locations
+        if hasattr(config, 'assets_dirs'):
+            # Handle both single path and list of paths
+            assets_dirs = config.assets_dirs
+            if not isinstance(assets_dirs, (list, tuple)):
+                assets_dirs = [assets_dirs]
+            
+            for assets_dir in assets_dirs:
+                norm_path = Path(assets_dir) / config.data.repo_id / "norm_stats.json"
+                if norm_path.exists():
+                    possible_paths.append(norm_path)
+                    logging.info(f"Found potential norm_stats at: {norm_path}")
+        
+        # Check in checkpoint directory assets (common for trained models)
+        if checkpoint_path is not None:
+            # Construct the same path as load_trained_policy does
+            if checkpoint_step is not None:
+                actual_checkpoint_path = f"{checkpoint_path}/{checkpoint_step}"
+            else:
+                actual_checkpoint_path = checkpoint_path
+            
+            checkpoint_assets_path = Path(actual_checkpoint_path) / "assets" / config.data.repo_id / "norm_stats.json"
+            if checkpoint_assets_path.exists():
+                possible_paths.append(checkpoint_assets_path)
+                logging.info(f"Found potential norm_stats at checkpoint assets: {checkpoint_assets_path}")
+        
+        # Try to create a minimal dataset instance to access its root
+        try:
+            dataset = LeRobotDataset(config.data.repo_id)
+            if hasattr(dataset, 'root') and dataset.root is not None:
+                norm_path = Path(dataset.root) / "norm_stats.json"
+                if norm_path.exists():
+                    possible_paths.append(norm_path)
+                    logging.info(f"Found potential norm_stats at dataset root: {norm_path}")
+        except Exception as e:
+            logging.debug(f"Could not access dataset root: {e}")
+        
+        for norm_stats_path in possible_paths:
+            try:
+                logging.info(f"Trying to load norm stats from: {norm_stats_path}")
+                with open(norm_stats_path, 'r') as f:
+                    norm_data = json.load(f)
+                
+                if 'norm_stats' in norm_data and 'actions' in norm_data['norm_stats']:
+                    actions_norm = norm_data['norm_stats']['actions']
+                    logging.info(f"Successfully loaded norm stats from {norm_stats_path}")
+                    logging.info(f"Actions norm stats keys: {list(actions_norm.keys())}")
+                    
+                    # Convert norm stats to min/max format for plotting
+                    if 'q01' in actions_norm and 'q99' in actions_norm:
+                        converted_stats = {
+                            'actions': {
+                                'min': actions_norm['q01'],
+                                'max': actions_norm['q99'],
+                                'mean': actions_norm.get('mean', []),
+                                'std': actions_norm.get('std', [])
+                            }
+                        }
+                        logging.info(f"Converted quantiles (q01/q99) to min/max format")
+                        logging.info(f"Actions min (q01): {converted_stats['actions']['min'][:5] if len(converted_stats['actions']['min']) > 5 else converted_stats['actions']['min']}")
+                        logging.info(f"Actions max (q99): {converted_stats['actions']['max'][:5] if len(converted_stats['actions']['max']) > 5 else converted_stats['actions']['max']}")
+                        return converted_stats
+                    elif 'min' in actions_norm and 'max' in actions_norm:
+                        # Already in min/max format
+                        converted_stats = {'actions': actions_norm}
+                        logging.info(f"Found actions stats in min/max format")
+                        return converted_stats
+                    else:
+                        logging.warning(f"Norm stats found but missing required keys (q01/q99 or min/max): {list(actions_norm.keys())}")
+                else:
+                    logging.warning(f"Norm stats file exists but missing 'norm_stats.actions' structure in {norm_stats_path}")
+                    
+            except Exception as e:
+                logging.debug(f"Could not load norm stats from {norm_stats_path}: {e}")
+                continue
+        
+        logging.warning("Could not find dataset statistics in any expected location")
+        return None
+        
+    except Exception as e:
+        logging.warning(f"Failed to load dataset statistics: {e}")
+        return None
+
+
 def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_step: int | None = None, checkpoint_dir: str | None = None):
     """Main evaluation function."""
     
@@ -405,6 +586,8 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
     if hasattr(config.data, 'video_backend'):
         config.data.video_backend = "pyav"
     
+    # We'll skip norm stats loading in the data loader and handle statistics loading separately for plots
+    
     # Debug: Print dataset configuration
     logging.info(f"Dataset repo_id: {config.data.repo_id}")
     logging.info(f"Dataset config: {config.data}")
@@ -413,8 +596,9 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
         config,
         sharding=data_sharding,
         num_workers=config.num_workers,
-        shuffle=False,  # Don't shuffle for evaluation
+        shuffle=True, 
         num_batches=num_eval_batches,
+        skip_norm_stats=True,  # Skip norm stats loading for evaluation
     )
     
     # Setup evaluation
@@ -575,6 +759,14 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
     logging.info(f"Evaluation complete. Total samples: {all_actions_gt.shape[0]}")
     logging.info(f"Action shape: {all_actions_gt.shape}")
     
+    # Load dataset statistics for proper y-axis scaling
+    logging.info("Loading dataset statistics for plot scaling...")
+    dataset_stats = load_dataset_stats(config, checkpoint_path, checkpoint_step)
+    if dataset_stats is not None:
+        logging.info("Successfully loaded dataset statistics")
+    else:
+        logging.warning("Could not load dataset statistics - plots will use auto-scaling")
+    
     # Create visualizations
     logging.info("Creating visualizations...")
     
@@ -613,6 +805,7 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
         all_actions_pred,
         str(eval_output_dir / "action_comparison.png"),
         action_names=action_names,
+        action_stats=dataset_stats,
     )
     
     # Error heatmap
