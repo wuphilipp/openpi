@@ -321,13 +321,19 @@ def main(config: _config.TrainConfig):
     data_loader = _data_loader.create_data_loader(
         config,
         sharding=data_sharding,
-        num_workers=config.num_workers,
         shuffle=True,
     )
     data_config = data_loader.data_config()  # Get the data config for debug image unnormalization
     data_iter = iter(data_loader)
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
+
+    # Log images from first batch to sanity check.
+    images_to_log = [
+        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
+        for i in range(min(5, len(next(iter(batch[0].images.values())))))
+    ]
+    wandb.log({"camera_views": images_to_log}, step=0)
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     jax.block_until_ready(train_state)
