@@ -1,4 +1,4 @@
-from typing import Literal, Optional, Tuple
+from typing import Literal, Optional, Tuple, List
 import time
 from dataclasses import dataclass
 from loguru import logger
@@ -46,9 +46,10 @@ class YAMSBaseInterface:
         self,
         server: viser.ViserServer = None,
         minimal: bool = False,
+        provide_handles: bool = True,
         device: Literal["cpu", "gpu"] = "cpu",
         left_base_xy: Tuple[float, float] = (0.0, 0.0),
-        right_base_xy: Tuple[float, float] = (0.0, -0.61),
+        right_base_xy: Tuple[float, float] = (0.0, -0.61), # Hardcoded for YAMS
     ):
         self.minimal = minimal
         self.left_base_xy = left_base_xy
@@ -57,8 +58,9 @@ class YAMSBaseInterface:
         # Set device
         jax.config.update("jax_platform_name", device)
 
-        # Initialize viser server
-        self.server = server if server is not None else viser.ViserServer()
+        if not minimal:
+            # Initialize viser server
+            self.server = server if server is not None else viser.ViserServer()
         
         # Load robot description using PyRoki for both arms
         self.urdf = load_robot_description("yam_description")
@@ -73,13 +75,14 @@ class YAMSBaseInterface:
         # Target link names for each YAM end effector 
         self.target_names = ["link_6"]  # YAM end effector is link_6
         print(f"[YAMSBaseInterface] Target link name for each arm: {self.target_names}")
-        
-        # Setup visualization
-        self._setup_visualization()
+
         
         if not minimal:
+            # Setup visualization
+            self._setup_visualization()
             self._setup_gui()
-            self._setup_transform_handles()
+            if provide_handles:
+                self._setup_transform_handles()
         
         # Initialize base poses for each arm
         self.base_pose_left = jaxlie.SE3.from_rotation_and_translation(
@@ -92,15 +95,17 @@ class YAMSBaseInterface:
         )
         
         # Update base frame positions
-        self.base_frame_left.position = onp.array(self.base_pose_left.translation())
-        self.base_frame_left.wxyz = onp.array(self.base_pose_left.rotation().wxyz)
-        self.base_frame_right.position = onp.array(self.base_pose_right.translation())
-        self.base_frame_right.wxyz = onp.array(self.base_pose_right.rotation().wxyz)
-        
         if not minimal:
+            self.base_frame_left.position = onp.array(self.base_pose_left.translation())
+            self.base_frame_left.wxyz = onp.array(self.base_pose_left.rotation().wxyz)
+            self.base_frame_right.position = onp.array(self.base_pose_right.translation())
+            self.base_frame_right.wxyz = onp.array(self.base_pose_right.rotation().wxyz)
+        
             # Initialize solver parameters
             self.has_jitted_left = False
             self.has_jitted_right = False
+
+        self.print_joint_order()
         
     def _setup_visualization(self):
         """Setup basic visualization elements for dual YAMs."""
@@ -260,8 +265,9 @@ class YAMSBaseInterface:
             self.base_frame_right.wxyz = onp.array(self.base_pose_right.rotation().wxyz)
         
         # Update robot configurations
-        self.urdf_vis_left.update_cfg(onp.array(self.joints_left))
-        self.urdf_vis_right.update_cfg(onp.array(self.joints_right))
+        if not self.minimal:
+            self.urdf_vis_left.update_cfg(onp.array(self.joints_left))
+            self.urdf_vis_right.update_cfg(onp.array(self.joints_right))
         
         # Update end-effector frames
         if hasattr(self, 'transform_handles'):
@@ -383,7 +389,101 @@ class YAMSBaseInterface:
         """Reset both arms to rest pose."""
         self.joints_left = self.rest_pose.copy()
         self.joints_right = self.rest_pose.copy()
+    
+    def print_joint_order(self):
+        """
+        Print the expected joint order for external interface.
         
+        Since YAM joints are flipped internally, this shows the order that
+        external callers should use when providing joint angles to methods
+        like compute_forward_kinematics() and update_cfg().
+        """
+        joint_names_reversed = list(reversed(self.urdf.joint_names))
+        print("Expected joint order per arm for external interface (0th is base):")
+        for i, joint_name in enumerate(joint_names_reversed):
+            print(f"  [{i}]: {joint_name}")
+        print(f"Total joints: {len(joint_names_reversed)}")
+        return joint_names_reversed
+    
+    def get_end_effector_poses(self, target_link_names: Optional[List[str]] = None) -> Tuple[jaxlie.SE3, jaxlie.SE3]:
+        """
+        Compute forward kinematics and return world poses of end effectors for both arms.
+        
+        Args:
+            target_link_names: List of target link names [left_target, right_target]. 
+                              If None, uses self.target_names or defaults to last link.
+        
+        Returns:
+            Tuple of (left_ee_pose, right_ee_pose) in world coordinates
+        """
+        # Determine target link names
+        if target_link_names is None:
+            if hasattr(self, 'target_names') and len(self.target_names) >= 1:
+                left_target = self.target_names[0]
+                right_target = self.target_names[0]  # Same target for both arms
+            else:
+                # Fallback to last link
+                left_target = self.robot_left.links.names[-1]
+                right_target = self.robot_right.links.names[-1]
+        else:
+            left_target = target_link_names[0] if len(target_link_names) > 0 else self.robot_left.links.names[-1]
+            right_target = target_link_names[1] if len(target_link_names) > 1 else target_link_names[0]
+        
+        # Left arm FK
+        left_link_idx = self.robot_left.links.names.index(left_target)
+        link_poses_left = self.robot_left.forward_kinematics(jnp.array(self.joints_left))
+        T_world_left_ee = self.base_pose_left @ jaxlie.SE3(link_poses_left[left_link_idx])
+        
+        # Right arm FK  
+        right_link_idx = self.robot_right.links.names.index(right_target)
+        link_poses_right = self.robot_right.forward_kinematics(jnp.array(self.joints_right))
+        T_world_right_ee = self.base_pose_right @ jaxlie.SE3(link_poses_right[right_link_idx])
+        
+        return T_world_left_ee, T_world_right_ee
+        
+    def solve_fk(self, left_joints: onp.ndarray, right_joints: onp.ndarray, 
+                                 target_link_names: Optional[List[str]] = None) -> Tuple[jaxlie.SE3, jaxlie.SE3]:
+        """
+        Compute forward kinematics for given joint configurations.
+        
+        Args:
+            left_joints: Joint angles for left arm (will be flipped internally for YAM)
+            right_joints: Joint angles for right arm (will be flipped internally for YAM)
+            target_link_names: List of target link names [left_target, right_target].
+                              If None, uses self.target_names or defaults to last link.
+        
+        Returns:
+            Tuple of (left_ee_pose, right_ee_pose) in world coordinates
+        """
+        # Flip joints for YAM robot configuration
+        left_joints_flipped = onp.flip(left_joints, axis=0)
+        right_joints_flipped = onp.flip(right_joints, axis=0)
+        
+        # Determine target link names
+        if target_link_names is None:
+            if hasattr(self, 'target_names') and len(self.target_names) >= 1:
+                left_target = self.target_names[0]
+                right_target = self.target_names[0]  # Same target for both arms
+            else:
+                # Fallback to last link (ON YAMS THIS IS BAD BECAUSE THE LAST LINK IS THE BASE, SO MIGHT NOT BE A GOOD HEURISTIC)
+                left_target = self.robot_left.links.names[-1]
+                right_target = self.robot_right.links.names[-1]
+        else:
+            left_target = target_link_names[0] if len(target_link_names) > 0 else self.robot_left.links.names[-1]
+            right_target = target_link_names[1] if len(target_link_names) > 1 else target_link_names[0]
+        
+        # Left arm FK
+        left_link_idx = self.robot_left.links.names.index(left_target)
+        link_poses_left = self.robot_left.forward_kinematics(jnp.array(left_joints_flipped))
+        T_world_left_ee = self.base_pose_left @ jaxlie.SE3(link_poses_left[left_link_idx])
+        
+        # Right arm FK
+        right_link_idx = self.robot_right.links.names.index(right_target)
+        link_poses_right = self.robot_right.forward_kinematics(jnp.array(right_joints_flipped))
+        T_world_right_ee = self.base_pose_right @ jaxlie.SE3(link_poses_right[right_link_idx])
+        
+        return T_world_left_ee, T_world_right_ee
+
     def run(self):
         """Main run loop."""
         while True:
@@ -398,8 +498,9 @@ class YAMSBaseInterface:
         cfg_right = onp.flip(cfg_right, axis=0)
         self.joints_left = cfg_left
         self.joints_right = cfg_right
-        self.urdf_vis_left.update_cfg(onp.array(self.joints_left))
-        self.urdf_vis_right.update_cfg(onp.array(self.joints_right))
+        if not self.minimal:
+            self.urdf_vis_left.update_cfg(onp.array(self.joints_left))
+            self.urdf_vis_right.update_cfg(onp.array(self.joints_right))
 
 
 if __name__ == "__main__":

@@ -54,10 +54,10 @@ class YAMSConfig:
     fps: int = 30
     chunk_size: int = 1000
     max_workers: int = 4 # Set lower on machines with less memory
-    filter_quality: bool = True
+    no_filter_quality: bool = False # If True, will not filter out low quality episodes
     max_episodes: Optional[int] = None
     skip_videos: bool = False
-    push_to_hub: bool = True
+    push_to_hub: bool = True # If True, will push to huggingface hub after processing
     push_to_hub_only: bool = False  # Only push existing dataset to hub, skip processing
     
     # Memory management settings
@@ -740,7 +740,7 @@ def process_yam_episode(
     # print(f"Processing episode {idx}: {episode_path.name}")
     
     # Quality filtering
-    if cfg.filter_quality and not is_episode_good_quality(episode_path):
+    if not cfg.no_filter_quality and not is_episode_good_quality(episode_path):
         print(f"  Skipping episode {idx}: poor quality")
         return None
     

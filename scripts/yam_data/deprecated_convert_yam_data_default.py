@@ -1,5 +1,5 @@
 """
-Minimal example script for converting YAMS dataset to LeRobot format using standard LeRobot dataset creation.
+Minimal example script for converting YAMS dataset to LeRobot format using standard LeRobot dataset creation. (SLOWER)
 
 This script uses LeRobot's built-in dataset creation and frame addition methods,
 letting LeRobot handle video encoding and dataset management.

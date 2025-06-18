@@ -68,7 +68,7 @@ class YAMSLeRobotViewer:
         
         # Initialize YAMS base interface if available
         # if HAS_YAMS_BASE:
-        self.yams_base_interface = YAMSBaseInterface(server=self.viser_server, minimal=True)
+        self.yams_base_interface = YAMSBaseInterface(server=self.viser_server, provide_handles=False)
         # else:
         #     self.yams_base_interface = None
         #     print("Warning: YAMS base interface not available - robot visualization disabled")
@@ -418,8 +418,8 @@ class YAMSLeRobotViewer:
 
         @self.show_robot.on_update
         def _(_):
-            if self.yams_base_interface is not None:
-                self.yams_base_interface.set_visibility(self.show_robot.value)
+            # Robot visibility is handled in _update_visualization method
+            pass
 
     def _update_gui_after_episode_change(self):
         """Update GUI after changing episodes."""
@@ -476,30 +476,29 @@ class YAMSLeRobotViewer:
 
                 # --- Forward Kinematics to update EE frames ---
                 try:
-                    # Get target link names, fallback to last link
+                    # Get target link names, fallback to default
                     try:
-                        left_target_name = self.yams_base_interface.target_names[0]
-                        right_target_name = self.yams_base_interface.target_names[1]
+                        target_names = [self.yams_base_interface.target_names[0]]
+                        if len(self.yams_base_interface.target_names) > 1:
+                            target_names.append(self.yams_base_interface.target_names[1])
+                        else:
+                            target_names.append(self.yams_base_interface.target_names[0])
                     except (AttributeError, IndexError):
-                        left_target_name = self.yams_base_interface.robot_left.links.names[-1]
-                        right_target_name = self.yams_base_interface.robot_right.links.names[-1]
-
-                    # Left arm FK
-                    left_link_idx = self.yams_base_interface.robot_left.links.names.index(left_target_name)
-                    link_poses_left = self.yams_base_interface.robot_left.forward_kinematics(jnp.array(left_joints))
-                    T_world_left_ee = self.yams_base_interface.base_pose_left @ jaxlie.SE3(link_poses_left[left_link_idx])
-                    self.left_ee_frame.position = np.array(T_world_left_ee.translation())
-                    self.left_ee_frame.wxyz = np.array(T_world_left_ee.rotation().wxyz)
-
-                    # Right arm FK
-                    right_link_idx = self.yams_base_interface.robot_right.links.names.index(right_target_name)
-                    link_poses_right = self.yams_base_interface.robot_right.forward_kinematics(jnp.array(right_joints))
-                    T_world_right_ee = self.yams_base_interface.base_pose_right @ jaxlie.SE3(link_poses_right[right_link_idx])
-                    self.right_ee_frame.position = np.array(T_world_right_ee.translation())
-                    self.right_ee_frame.wxyz = np.array(T_world_right_ee.rotation().wxyz)
+                        target_names = None  # Will use defaults in the method
+                    
+                    # Compute FK
+                    left_ee_pose, right_ee_pose = self.yams_base_interface.solve_fk(
+                        left_joints, right_joints, target_names
+                    )
+                    
+                    # Update EE frame positions
+                    self.left_ee_frame.position = np.array(left_ee_pose.translation())
+                    self.left_ee_frame.wxyz = np.array(left_ee_pose.rotation().wxyz)
+                    self.right_ee_frame.position = np.array(right_ee_pose.translation())
+                    self.right_ee_frame.wxyz = np.array(right_ee_pose.rotation().wxyz)
+                    
                 except Exception as e:
                     print(f"FK calculation failed: {e}")
-                # --- End of FK code ---
         
         for camera_key, display in self.camera_displays.items():
             if camera_key in self.episode_data and frame_idx < len(self.episode_data[camera_key]):
