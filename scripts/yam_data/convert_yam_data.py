@@ -24,17 +24,19 @@ import gc
 @dataclass
 class YAMSConfig:
     yam_data_path: str | List[str] = field(default_factory=lambda: [
-        "/home/justinyu/nfs_us/nfs/data/sz_05/20250416", 
-        "/home/justinyu/nfs_us/nfs/data/sz_05/20250425", 
-        "/home/justinyu/nfs_us/nfs/data/sz_04/20250415",
-        "/home/justinyu/nfs_us/nfs/data/sz_04/20250412",
-        "/home/justinyu/nfs_us/nfs/data/sz_04/20250411",
-        "/home/justinyu/nfs_us/nfs/data/sz_04/20250410",
-        "/home/justinyu/nfs_us/nfs/data/sz_03/20250423",
-        "/home/justinyu/nfs_us/nfs/data/sz_03/20250417"
+        # "/home/justinyu/nfs_us/nfs/data/sz_05/20250416", 
+        # "/home/justinyu/nfs_us/nfs/data/sz_05/20250425", 
+        # "/home/justinyu/nfs_us/nfs/data/sz_04/20250415",
+        # "/home/justinyu/nfs_us/nfs/data/sz_04/20250412",
+        # "/home/justinyu/nfs_us/nfs/data/sz_04/20250411",
+        # "/home/justinyu/nfs_us/nfs/data/sz_04/20250410",
+        # "/home/justinyu/nfs_us/nfs/data/sz_03/20250423",
+        # "/home/justinyu/nfs_us/nfs/data/sz_03/20250417"
+        "/home/justinyu/nfs_us/test_justin/20250618"
+
     ])
     output_dir: Path = Path("/home/justinyu/nfs_us/justinyu/yam_lerobot_datasets")
-    repo_name: str = "uynitsuj/yam_bimanual_load_dishes_large_absolute"
+    repo_name: str = "uynitsuj/yam_debug"
     language_instruction: str = "Perform bimanual manipulation task" # Default task name; gets overwritten by task name in metadata
     
     # YAMS camera keys
@@ -50,6 +52,7 @@ class YAMSConfig:
     max_episodes: Optional[int] = None
     skip_videos: bool = False
     push_to_hub: bool = True
+    push_to_hub_only: bool = False  # Only push existing dataset to hub, skip processing
     
     # Memory management settings
     max_frames_per_chunk: int = 1000  # Process episodes in chunks to avoid OOM on long episodes
@@ -938,6 +941,96 @@ def main(cfg: YAMSConfig):
     """Main function to convert YAMS data to LeRobot format."""
     
     print("=== Direct YAMS to LeRobot Converter ===")
+    
+    # Handle push-to-hub-only mode
+    if cfg.push_to_hub_only:
+        print("🚀 Push-to-Hub-Only Mode")
+        base_dir = cfg.output_dir / cfg.repo_name
+        
+        if not base_dir.exists():
+            print(f"❌ Dataset directory does not exist: {base_dir}")
+            print("Cannot push non-existent dataset to hub.")
+            return
+        
+        # Verify dataset structure exists
+        required_files = [
+            base_dir / "meta" / "info.json",
+            base_dir / "meta" / "episodes.jsonl", 
+            base_dir / "meta" / "tasks.jsonl"
+        ]
+        
+        missing_files = [f for f in required_files if not f.exists()]
+        if missing_files:
+            print(f"❌ Missing required files: {missing_files}")
+            print("Cannot push incomplete dataset to hub.")
+            return
+        
+        if not HAS_LEROBOT:
+            print("❌ Cannot push to hub: LeRobot not available")
+            print("Install lerobot package to enable hub push functionality")
+            return
+        
+        # Load info.json to get dataset statistics
+        with open(base_dir / "meta" / "info.json", 'r') as f:
+            info = json.load(f)
+        
+        print(f"📊 Dataset Info:")
+        print(f"  Repository: {cfg.repo_name}")
+        print(f"  Total episodes: {info.get('total_episodes', 'unknown')}")
+        print(f"  Total frames: {info.get('total_frames', 'unknown')}")
+        print(f"  Dataset path: {base_dir}")
+        
+        # Perform hub push
+        try:
+            from huggingface_hub import HfApi, whoami
+            
+            # Check authentication
+            user_info = whoami()
+            print(f"✅ Authenticated as: {user_info['name']}")
+            
+            # Create repository if it doesn't exist
+            api = HfApi()
+            print(f"🏗️  Ensuring repository exists: {cfg.repo_name}")
+            repo_url = api.create_repo(
+                repo_id=cfg.repo_name,
+                repo_type="dataset",
+                private=True,
+                exist_ok=True
+            )
+            print(f"✅ Repository ready: {repo_url}")
+            
+            # Create version tag
+            try:
+                api.create_tag(
+                    repo_id=cfg.repo_name,
+                    tag="v2.1",
+                    repo_type="dataset"
+                )
+                print(f"✅ Version tag created: v2.1")
+            except Exception as tag_error:
+                print(f"⚠️  Version tag creation failed (may already exist): {tag_error}")
+            
+            # Instantiate LeRobotDataset and push
+            dataset = LeRobotDataset(repo_id=cfg.repo_name, root=base_dir)
+            print(f"✅ LeRobotDataset loaded with {len(dataset)} frames")
+            
+            print(f"🚀 Pushing dataset to Hugging Face Hub: {cfg.repo_name}")
+            dataset.push_to_hub(
+                tags=["yams", "bimanual", "manipulation", "robotics"],
+                private=True,
+                push_videos=not cfg.skip_videos,
+                license="apache-2.0",
+            )
+            print(f"✅ Dataset successfully pushed to hub: {cfg.repo_name}")
+            print(f"🔗 View at: https://huggingface.co/datasets/{cfg.repo_name}")
+            
+        except Exception as e:
+            print(f"❌ Failed to push to hub: {e}")
+        
+        return  # Exit early since we're only pushing to hub
+    
+    # Normal processing mode
+    print("🔄 Dataset Processing Mode")
     
     # Handle both single path and list of paths for display
     if isinstance(cfg.yam_data_path, list):

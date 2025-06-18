@@ -154,8 +154,8 @@ def process_joint_data(joint_data: Dict) -> Optional[np.ndarray]:
     right_gripper_pos = joint_data['right-gripper_pos']  # Shape: (N, 1)
     
     # Apply joint position flipping (create copies only when needed)
-    left_joint_pos = np.flip(left_joint_pos, axis=1).copy()  # Copy needed for flip
-    right_joint_pos = np.flip(right_joint_pos, axis=1).copy()  # Copy needed for flip
+    # left_joint_pos = np.flip(left_joint_pos, axis=1).copy()  # Copy needed for flip # BAD BAD BAD
+    # right_joint_pos = np.flip(right_joint_pos, axis=1).copy()  # Copy needed for flip # BAD BAD BAD
     
     # Pre-allocate full state array to avoid multiple concatenations
     seq_length = len(left_joint_pos)

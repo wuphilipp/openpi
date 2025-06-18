@@ -459,6 +459,11 @@ class YAMSLeRobotViewer:
         if 'states' in self.episode_data and frame_idx < len(self.episode_data['states']):
             state = self.episode_data['states'][frame_idx]
             left_joints, left_gripper, right_joints, right_gripper = self._parse_yams_state(state)
+
+            # Print numpy array at 2 sig figs
+            print(f"left_joints: {left_joints.round(2)}")
+            print(f"right_joints: {right_joints.round(2)}")
+            print('\n\n')
             
             self.left_gripper_pos.value = float(left_gripper)
             self.right_gripper_pos.value = float(right_gripper)
@@ -523,7 +528,7 @@ class YAMSLeRobotViewer:
 
 
 def main(
-    dataset_path: str = "/home/justinyu/nfs_us/justinyu/yam_lerobot_datasets/uynitsuj/yam_bimanual_load_dishes_absolute",
+    dataset_path: str = "/home/justinyu/nfs_us/justinyu/yam_lerobot_datasets/uynitsuj/yam_debug",
 ):
     """
     Main function for YAMS LeRobot trajectory viewer.
