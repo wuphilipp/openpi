@@ -425,7 +425,7 @@ class LeRobotYamDataConfig(DataConfigFactory):
         # Data transforms using YAM policy transforms
         data_transforms = _transforms.Group(
             inputs=[yam_policy.YamInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
-            outputs=[yam_policy.YamOutputs()],
+            outputs=[yam_policy.YamOutputs(robot_action_dim = 14)], # 14 for joint space, 20 for cartesian space TODO: CHECK THIS
         )
 
         # We return all data transforms for training and inference. No need to change anything here.

@@ -34,8 +34,14 @@ class YamInputs(transforms.DataTransformFn):
     - left_camera-images-rgb: [channel, height, width] - Left camera
     - right_camera-images-rgb: [channel, height, width] - Right camera  
     - top_camera-images-rgb: [channel, height, width] - Top camera
-    - state: [14] - Joint positions for both arms (6 joints + 1 gripper per arm)
-    - actions: [action_horizon, 14] - Joint actions for both arms (absolute joint space)
+    - state: 
+    [14] - Joint positions for both arms (6 joints + 1 gripper per arm)
+    or
+    [20] - Cartesian positions for both arms (6d rot + 3d pos + 1 gripper pos per arm)
+    - actions: 
+    [action_horizon, 14] - Joint actions for both arms
+    or
+    [action_horizon, 20] - Cartesian actions for both arms
     """
 
     # The action dimension of the model. Will be used to pad state and actions.
@@ -91,8 +97,10 @@ class YamInputs(transforms.DataTransformFn):
 class YamOutputs(transforms.DataTransformFn):
     """Outputs for the YAM policy."""
 
+    robot_action_dim: int = 14
+
     def __call__(self, data: dict) -> dict:
         # Only return the first 14 dims (YAM joint space).
-        actions = np.asarray(data["actions"][:, :14])
+        actions = np.asarray(data["actions"][:, :self.robot_action_dim])
         # YAM uses absolute joint actions - no conversion needed
         return {"actions": actions}
