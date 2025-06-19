@@ -6,7 +6,7 @@ import dataclasses
 import difflib
 import logging
 import pathlib
-from typing import Any, Protocol, TypeAlias, List
+from typing import Any, Protocol, TypeAlias, List, Literal
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -393,15 +393,17 @@ class LeRobotXmiRbyDataConfig(DataConfigFactory):
 class LeRobotYamDataConfig(DataConfigFactory):
     """
     This config is used to configure transforms for the YAM bimanual robot dataset.
-    
-    The YAM data uses absolute joint positions:
+    The YAM data can use absolute joint positions or absolute cartesian positions:
     - State format: [left_6_joints, left_1_gripper, right_6_joints, right_1_gripper] = 14D
+    or
+    - State format: [left_6d_rot, left_3d_pos, left_1d_gripper, right_6d_rot, right_3d_pos, right_1d_gripper] = 20D
     - Three camera views: left exterior, right exterior, and top
-    - Actions are absolute joint positions
+    - Actions are absolute joint positions or absolute cartesian positions
     """
     
     # If provided, will be injected into the input data if the "prompt" key is not present.
     default_prompt: str | None = None
+    action_space: Literal["joint", "cartesian"] = "joint"
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -422,10 +424,17 @@ class LeRobotYamDataConfig(DataConfigFactory):
 
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
 
+        if self.action_space == "joint":
+            robot_action_dim = 14
+        elif self.action_space == "cartesian":
+            robot_action_dim = 20
+        else:
+            raise ValueError(f"Invalid action space: {self.action_space}")
+
         # Data transforms using YAM policy transforms
         data_transforms = _transforms.Group(
             inputs=[yam_policy.YamInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
-            outputs=[yam_policy.YamOutputs(robot_action_dim = 14)], # 14 for joint space, 20 for cartesian space TODO: CHECK THIS
+            outputs=[yam_policy.YamOutputs(robot_action_dim=robot_action_dim)],
         )
 
         # We return all data transforms for training and inference. No need to change anything here.
@@ -864,6 +873,7 @@ _CONFIGS = [
         model=pi0.Pi0Config(),
         data=LeRobotYamDataConfig(
             repo_id="uynitsuj/yam_bimanual_load_dishes_absolute",
+            action_space="joint",
             default_prompt="Load dishes into tabletop dishrack",
             base_config=DataConfig(
                 prompt_from_task=True,
@@ -877,6 +887,7 @@ _CONFIGS = [
         model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotYamDataConfig(
             repo_id="uynitsuj/yam_debug_cartesian_space",
+            action_space="cartesian",
             default_prompt="debug",
             base_config=DataConfig(
                 prompt_from_task=True,
