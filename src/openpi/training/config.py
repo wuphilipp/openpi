@@ -872,7 +872,7 @@ _CONFIGS = [
         name="pi0_yam",
         model=pi0.Pi0Config(),
         data=LeRobotYamDataConfig(
-            repo_id="uynitsuj/yam_bimanual_load_dishes_absolute",
+            repo_id="uynitsuj/yam_unload_dishes_dishrack_joint_space",
             action_space="joint",
             default_prompt="Load dishes into tabletop dishrack",
             base_config=DataConfig(
@@ -886,9 +886,9 @@ _CONFIGS = [
         name="pi0_yam_low_mem_finetune",
         model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotYamDataConfig(
-            repo_id="uynitsuj/yam_debug_cartesian_space",
-            action_space="cartesian",
-            default_prompt="debug",
+            repo_id="uynitsuj/yam_unload_dishes_dishrack_joint_space",
+            action_space="joint", # "joint" for absolute joint positions, "cartesian" for absolute cartesian positions
+            default_prompt="Unload dishes from tabletop dish rack",
             base_config=DataConfig(
                 prompt_from_task=True,
             ),

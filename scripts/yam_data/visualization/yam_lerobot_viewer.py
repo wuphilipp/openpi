@@ -51,9 +51,9 @@ class YAMSLeRobotViewer:
         self._parse_dataset_info()
         
         # Initialize episode data
-        self.current_episode_idx = 0
         self.current_frame_in_episode = 0
         self.episode_data = {}
+        self.current_episode_name = "Loading..."
         
         # Set up viser server
         self.viser_server = viser.ViserServer()
@@ -65,7 +65,9 @@ class YAMSLeRobotViewer:
         #     self.yams_base_interface = None
         #     print("Warning: YAMS base interface not available - robot visualization disabled")
         
-        # Load first episode
+        # Load first available episode
+        available_episodes = sorted(self.episode_indices.keys())
+        self.current_episode_idx = available_episodes[0] if available_episodes else 0
         self._load_episode_data(self.current_episode_idx)
         
         # Set up visualization
@@ -95,18 +97,25 @@ class YAMSLeRobotViewer:
             for episode in reader:
                 self.episodes.append(episode)
         
-        # Create episode indices (similar to LeRobotDataset format)
-        self.episode_indices = []
+        # Create episode indices mapping (episode_index -> episode info)
+        # Sort episodes by episode_index to ensure proper ordering
+        sorted_episodes = sorted(self.episodes, key=lambda x: x.get('episode_index', 0))
+        
+        self.episode_indices = {}
         current_frame = 0
-        for episode in self.episodes:
+        self.max_episode_index = 0
+        
+        for episode in sorted_episodes:
+            episode_idx = episode['episode_index']
             episode_length = episode['length']
-            self.episode_indices.append({
-                'episode_index': episode['episode_index'],
+            self.episode_indices[episode_idx] = {
+                'episode_index': episode_idx,
                 'from': current_frame,
                 'to': current_frame + episode_length,
                 'length': episode_length
-            })
+            }
             current_frame += episode_length
+            self.max_episode_index = max(self.max_episode_index, episode_idx)
         
         # Load tasks.jsonl
         tasks_path = self.dataset_path / "meta" / "tasks.jsonl"
@@ -147,30 +156,32 @@ class YAMSLeRobotViewer:
     
     def _load_episode_data(self, episode_idx: int):
         """Load data for a specific episode."""
-        if episode_idx >= len(self.episode_indices):
-            print(f"Episode {episode_idx} out of range")
+        if episode_idx not in self.episode_indices:
+            print(f"Episode {episode_idx} not found in dataset")
             return
         
         self.current_episode_idx = episode_idx
         episode_info = self.episode_indices[episode_idx]
         
-        print(f"Loading episode {episode_idx}: frames {episode_info['from']} to {episode_info['to']}")
-        
-        # Get episode data slice
-        episode_length = episode_info['length']
-        
-        # Load episode data from parquet files
-        self.episode_data = {}
-        
-        # Find the chunk for this episode
+        # Find the chunk for this episode to construct episode path
         chunk_id = episode_idx // self.info.get('chunks_size', 1000)
         
-        # Load parquet file for this episode
+        # Construct episode path for printing
         parquet_path_str = self.info["data_path"].format(
             episode_chunk=chunk_id,
             episode_index=episode_idx,
         )
-        parquet_path = self.dataset_path / parquet_path_str
+        episode_path = self.dataset_path / parquet_path_str
+        
+        print(f"\n--- Loading Episode {episode_idx} ---")
+        print(f"Episode path: {episode_path}")
+        print(f"Frames: {episode_info['from']} to {episode_info['to']} ({episode_info['length']} frames) [metadata]")
+        
+        # Load episode data from parquet files
+        self.episode_data = {}
+        
+        # Load parquet file for this episode (reuse chunk_id and path from above)
+        parquet_path = episode_path
         
         if parquet_path.exists():
             df = pd.read_parquet(parquet_path)
@@ -188,6 +199,19 @@ class YAMSLeRobotViewer:
             print(f"Loaded parquet data: {len(df)} frames")
         else:
             print(f"Warning: Parquet file not found: {parquet_path}")
+        
+        # Determine actual episode length from loaded data
+        episode_length = 0
+        if 'states' in self.episode_data:
+            episode_length = len(self.episode_data['states'])
+        elif 'actions' in self.episode_data:
+            episode_length = len(self.episode_data['actions'])
+        elif parquet_path.exists():
+            # Fallback to dataframe length if states/actions not processed
+            episode_length = len(df)
+        else:
+            # Last resort: use metadata
+            episode_length = episode_info['length']
         
         # Load video data
         for camera_key in self.camera_keys:
@@ -207,19 +231,48 @@ class YAMSLeRobotViewer:
             else:
                 print(f"Warning: Video file not found: {video_path}")
         
-        # Get task information
-        episode_data = self.episodes[episode_idx]
+        # Get task information and episode name
+        # Find the episode metadata that matches this episode_index
+        episode_data = None
+        for ep_data in self.episodes:
+            if ep_data.get('episode_index') == episode_idx:
+                episode_data = ep_data
+                break
+        
+        if episode_data is None:
+            print(f"Warning: No metadata found for episode_index {episode_idx}")
+            episode_data = {'episode_index': episode_idx, 'length': episode_length}
+            
         task_idx = episode_data.get('task_index', 0)
         if task_idx in self.tasks:
             self.current_task = self.tasks[task_idx]
         else:
-            self.current_task = f"Task {task_idx}"
+            # Try to extract task from 'tasks' field if available
+            tasks_list = episode_data.get('tasks', [])
+            if tasks_list:
+                self.current_task = tasks_list[0]  # Use first task
+            else:
+                self.current_task = f"Task {task_idx}"
+        
+        # Extract episode name (use timestamp or other identifier if available)
+        self.current_episode_name = episode_data.get('episode_name', None)
+        if self.current_episode_name is None:
+            # Try to extract name from path or create a meaningful name
+            if hasattr(episode_data, 'timestamp'):
+                self.current_episode_name = f"episode_{episode_data['timestamp']}"
+            else:
+                # Use the parquet filename as episode name
+                self.current_episode_name = parquet_path.stem
         
         self.episode_length = episode_length
         self.current_frame_in_episode = 0
         
-        print(f"Episode {episode_idx} loaded: {self.episode_length} frames")
+        print(f"Episode name: {self.current_episode_name}")
         print(f"Task: {self.current_task}")
+        print(f"Actual episode length: {self.episode_length} frames (metadata claimed: {episode_info['length']})")
+        if self.episode_length != episode_info['length']:
+            print(f"WARNING: Episode length mismatch! Using actual data length: {self.episode_length}")
+        print("---")
     
     def _load_video_frames(self, video_path: Path) -> Optional[np.ndarray]:
         """Load frames from a video file."""
@@ -296,15 +349,20 @@ class YAMSLeRobotViewer:
         """Set up GUI controls."""
         
         with self.viser_server.gui.add_folder("Episode Selection"):
+            # Get available episode indices (may not be sequential)
+            available_episodes = sorted(self.episode_indices.keys())
             self.episode_selector = self.viser_server.gui.add_slider(
                 "Episode",
-                min=0,
-                max=len(self.episode_indices) - 1,
+                min=min(available_episodes),
+                max=max(available_episodes),
                 step=1,
-                initial_value=0,
+                initial_value=min(available_episodes),
             )
             self.episode_info = self.viser_server.gui.add_text(
-                "Episode Info", f"Episode 0/{len(self.episode_indices) - 1}"
+                "Episode Info", f"Episode {min(available_episodes)}/{max(available_episodes)}"
+            )
+            self.episode_name = self.viser_server.gui.add_text(
+                "Episode Name", "Loading..."
             )
             self.task_info = self.viser_server.gui.add_text(
                 "Task", getattr(self, "current_task", "Loading...")
@@ -419,7 +477,9 @@ class YAMSLeRobotViewer:
         self.frame_slider.value = 0
         self.current_frame_in_episode = 0
         
-        self.episode_info.value = f"Episode {self.current_episode_idx}/{len(self.episode_indices)-1}"
+        available_episodes = sorted(self.episode_indices.keys())
+        self.episode_info.value = f"Episode {self.current_episode_idx}/{max(available_episodes)}"
+        self.episode_name.value = getattr(self, "current_episode_name", "Unknown")
         self.task_info.value = self.current_task
         
         # Update camera displays
@@ -540,15 +600,25 @@ class YAMSLeRobotViewer:
                 if self.frame_slider.value < self.frame_slider.max:
                     self.frame_slider.value += 1
                 else:
-                    if self.episode_selector.value < self.episode_selector.max:
-                        self.episode_selector.value += 1
-                    else:
-                        self.episode_selector.value = 0
+                    # Auto-advance to next available episode or loop
+                    available_episodes = sorted(self.episode_indices.keys())
+                    current_episode = int(self.episode_selector.value)
+                    try:
+                        current_idx = available_episodes.index(current_episode)
+                        if current_idx < len(available_episodes) - 1:
+                            # Go to next available episode
+                            self.episode_selector.value = available_episodes[current_idx + 1]
+                        else:
+                            # Loop back to first available episode
+                            self.episode_selector.value = available_episodes[0]
+                    except ValueError:
+                        # Current episode not in available list, go to first
+                        self.episode_selector.value = available_episodes[0]
             time.sleep(1.0 / 30.0) # Aim for 30fps playback
 
 
 def main(
-    dataset_path: str = "/home/justinyu/nfs_us/justinyu/yam_lerobot_datasets/uynitsuj/yam_debug_cartesian_space",
+    dataset_path: str = "/home/justinyu/.cache/huggingface/lerobot/uynitsuj/yam_unload_dishes_dishrack_joint_space",
 ):
     """
     Main function for YAMS LeRobot trajectory viewer.

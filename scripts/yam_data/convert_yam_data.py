@@ -26,6 +26,8 @@ from typing import List, Optional, Literal
 import numpy as np
 import tyro
 import gc
+from lerobot.common.constants import HF_LEROBOT_HOME
+
 
 @dataclass
 class YAMSConfig:
@@ -38,11 +40,12 @@ class YAMSConfig:
         # "/home/justinyu/nfs_us/nfs/data/sz_04/20250410",
         # "/home/justinyu/nfs_us/nfs/data/sz_03/20250423",
         # "/home/justinyu/nfs_us/nfs/data/sz_03/20250417"
-        "/home/justinyu/nfs_us/test_justin/20250618"
+
+        # "/home/justinyu/nfs_us/test_justin/20250618"
+        "/home/justinyu/nfs_us/philipp/internal_justin/061825_annotated_dishes/unload_dishes_from_tabletop_dish_rack"
 
     ])
-    output_dir: Path = Path("/home/justinyu/nfs_us/justinyu/yam_lerobot_datasets")
-    repo_name: str = "uynitsuj/yam_debug_cartesian_space"
+    repo_name: str = "uynitsuj/yam_unload_dishes_dishrack_joint_space"
     language_instruction: str = "Perform bimanual manipulation task" # Default task name; gets overwritten by task name in metadata
     
     # YAMS camera keys
@@ -53,14 +56,14 @@ class YAMSConfig:
     resize_size: int = 224 # image size
     fps: int = 30 # video fps
     chunk_size: int = 1000 # number of frames per chunk (for memory considerations)
-    max_workers: int = 1 # Set lower on machines with less memory
+    max_workers: int = 6 # Set lower on machines with less memory
     no_filter_quality: bool = False # If True, will not filter out low quality episodes
     max_episodes: Optional[int] = None # If specified, will only process this many episodes
     skip_videos: bool = False # If True, will not process videos
-    push_to_hub: bool = True # If True, will push to huggingface hub after processing
+    push_to_hub: bool = False # If True, will push to huggingface hub after processing
     push_to_hub_only: bool = False  # Only push existing dataset to hub, skip processing
 
-    action_space: Literal["abs_joint", "abs_cartesian"] = "abs_cartesian" # "abs_joint" for absolute joint positions, "abs_cartesian" for absolute cartesian positions
+    action_space: Literal["abs_joint", "abs_cartesian"] = "abs_joint" # "abs_joint" for absolute joint positions, "abs_cartesian" for absolute cartesian positions
     
     # Memory management settings
     max_frames_per_chunk: int = 1000  # Process episodes in chunks to avoid OOM on long episodes
@@ -68,9 +71,9 @@ class YAMSConfig:
     # Video encoding settings
     benchmark_encoders: bool = True  # Benchmark encoders on first episode
     encoder_name: Optional[str] = None  # Force specific encoder, or None for auto-selection
-    encoding_quality: str = 'fastest'  # 'fastest' or 'fast'
+    encoding_quality: str = 'fast'  # 'fastest' or 'fast'
 
-    robot: Optional[object] = field(default=None, repr=False) # YAMSBaseInterface object (Populated later)
+    robot: Optional[object] = field(default=None, repr=False) # YAMSBaseInterface object (Populated later, used for FK in the case of abs_cartesian)
 
 # Import utility modules
 try:
@@ -984,7 +987,7 @@ def main(cfg: YAMSConfig):
     # Handle push-to-hub-only mode
     if cfg.push_to_hub_only:
         print("🚀 Push-to-Hub-Only Mode")
-        base_dir = cfg.output_dir / cfg.repo_name
+        base_dir = HF_LEROBOT_HOME / cfg.repo_name
         
         if not base_dir.exists():
             print(f"❌ Dataset directory does not exist: {base_dir}")
@@ -1079,7 +1082,7 @@ def main(cfg: YAMSConfig):
     else:
         print(f"Input path: {cfg.yam_data_path}")
     
-    print(f"Output path: {cfg.output_dir}")
+    print(f"Output path: {HF_LEROBOT_HOME/cfg.repo_name}")
     print(f"Repository name: {cfg.repo_name}")
     print(f"Skip videos: {cfg.skip_videos}")
     print(f"Max episodes: {cfg.max_episodes or 'unlimited'}")
@@ -1111,7 +1114,7 @@ def main(cfg: YAMSConfig):
         auto_disabled_push = True
     
     # Prepare folders - include repo_name in path structure
-    base_dir = cfg.output_dir / cfg.repo_name
+    base_dir = HF_LEROBOT_HOME / cfg.repo_name
     
     # Check for resume capability
     resume_mode = False
@@ -1344,7 +1347,7 @@ def main(cfg: YAMSConfig):
         json.dump(info, f, indent=2)
     
     print(f"\n=== Conversion Complete ===")
-    print(f"Dataset saved to: {cfg.output_dir}")
+    print(f"Dataset saved to: {HF_LEROBOT_HOME/cfg.repo_name}")
     if resume_mode:
         print(f"Processed {len(all_episodes)} new episodes")
         print(f"Total episodes in dataset: {len(all_combined_episodes)}")
@@ -1352,6 +1355,42 @@ def main(cfg: YAMSConfig):
         print(f"Total episodes: {len(all_combined_episodes)}")
     print(f"Total frames: {total_frames}")
     print(f"Total chunks: {actual_chunks}")
+
+    # Create repository if it doesn't exist
+    try:
+        from huggingface_hub import HfApi, whoami
+        
+        # Check authentication
+        user_info = whoami()
+        print(f"✅ Authenticated as: {user_info['name']}")
+        
+        # Create repository (will not fail if it already exists)
+        api = HfApi()
+        print(f"🏗️  Ensuring repository exists: {cfg.repo_name}")
+        repo_url = api.create_repo(
+            repo_id=cfg.repo_name,
+            repo_type="dataset",
+            private=True,  # Make it private
+            exist_ok=True  # Won't fail if repo already exists
+        )
+        print(f"✅ Repository ready: {repo_url}")
+        
+        # Create version tag required by LeRobot
+        try:
+            api.create_tag(
+                repo_id=cfg.repo_name,
+                tag="v2.1",  # Match the codebase_version in info.json
+                repo_type="dataset"
+            )
+            print(f"✅ Version tag created: v2.1")
+        except Exception as tag_error:
+            print(f"⚠️  Version tag creation failed (may already exist): {tag_error}")
+        
+    except Exception as e:
+        print(f"❌ Failed to create/verify repository: {e}")
+        print("Cannot proceed with hub push without repository access.")
+        return
+    
     
     # Provide manual upload instructions if push was auto-disabled
     if auto_disabled_push:
@@ -1378,40 +1417,6 @@ def main(cfg: YAMSConfig):
         print(f"Dataset root: {dataset_root}")
         print(f"Repository ID: {cfg.repo_name}")
         
-        # Create repository if it doesn't exist
-        try:
-            from huggingface_hub import HfApi, whoami
-            
-            # Check authentication
-            user_info = whoami()
-            print(f"✅ Authenticated as: {user_info['name']}")
-            
-            # Create repository (will not fail if it already exists)
-            api = HfApi()
-            print(f"🏗️  Ensuring repository exists: {cfg.repo_name}")
-            repo_url = api.create_repo(
-                repo_id=cfg.repo_name,
-                repo_type="dataset",
-                private=True,  # Make it private
-                exist_ok=True  # Won't fail if repo already exists
-            )
-            print(f"✅ Repository ready: {repo_url}")
-            
-            # Create version tag required by LeRobot
-            try:
-                api.create_tag(
-                    repo_id=cfg.repo_name,
-                    tag="v2.1",  # Match the codebase_version in info.json
-                    repo_type="dataset"
-                )
-                print(f"✅ Version tag created: v2.1")
-            except Exception as tag_error:
-                print(f"⚠️  Version tag creation failed (may already exist): {tag_error}")
-            
-        except Exception as e:
-            print(f"❌ Failed to create/verify repository: {e}")
-            print("Cannot proceed with hub push without repository access.")
-            return
         
         # Verify dataset structure exists
         required_files = [
