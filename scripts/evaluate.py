@@ -707,16 +707,16 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
                     state_mse_01 = np.mean((state0 - state1) ** 2)
                     state_mse_02 = np.mean((state0 - state2) ** 2)
                     
-                    logging.info(f"State similarity check:")
-                    logging.info(f"  MSE between sample 0 and 1: {state_mse_01:.6f}")
-                    logging.info(f"  MSE between sample 0 and 2: {state_mse_02:.6f}")
+                    # logging.info(f"State similarity check:")
+                    # logging.info(f"  MSE between sample 0 and 1: {state_mse_01:.6f}")
+                    # logging.info(f"  MSE between sample 0 and 2: {state_mse_02:.6f}")
                     
                     if state_mse_01 < 1e-10 and state_mse_02 < 1e-10:
                         logging.warning(f"  ⚠️  States appear to be IDENTICAL")
-                    else:
-                        logging.info(f"  ✅ States appear to be different")
+            #         else:
+            #             logging.info(f"  ✅ States appear to be different")
                 
-            logging.info(f"Actions GT: shape={np.array(actions_gt).shape}")
+            # logging.info(f"Actions GT: shape={np.array(actions_gt).shape}")
             
             # Check actions for duplication too
             actions_array = np.array(actions_gt)
@@ -728,14 +728,14 @@ def main(config: _config.TrainConfig, num_eval_batches: int = 10, checkpoint_ste
                 action_mse_01 = np.mean((action0 - action1) ** 2)
                 action_mse_02 = np.mean((action0 - action2) ** 2)
                 
-                logging.info(f"Action similarity check:")
-                logging.info(f"  MSE between sample 0 and 1: {action_mse_01:.6f}")
-                logging.info(f"  MSE between sample 0 and 2: {action_mse_02:.6f}")
+                # logging.info(f"Action similarity check:")
+                # logging.info(f"  MSE between sample 0 and 1: {action_mse_01:.6f}")
+                # logging.info(f"  MSE between sample 0 and 2: {action_mse_02:.6f}")
                 
                 if action_mse_01 < 1e-10 and action_mse_02 < 1e-10:
                     logging.warning(f"  ⚠️  Actions appear to be IDENTICAL")
-                else:
-                    logging.info(f"  ✅ Actions appear to be different")
+                # else:
+                #     logging.info(f"  ✅ Actions appear to be different")
             
             logging.info("==========================================")
         

@@ -15,7 +15,7 @@ from openpi.shared import array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 
 logger = logging.getLogger("openpi")
-
+import time
 
 def make_attn_mask(input_mask, mask_ar):
     """Adapted from big_vision.

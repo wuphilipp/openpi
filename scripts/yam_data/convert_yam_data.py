@@ -39,31 +39,37 @@ class YAMSConfig:
         # "/home/justinyu/nfs_us/nfs/data/sz_04/20250411",
         # "/home/justinyu/nfs_us/nfs/data/sz_04/20250410",
         # "/home/justinyu/nfs_us/nfs/data/sz_03/20250423",
-        # "/home/justinyu/nfs_us/nfs/data/sz_03/20250417"
+        # "/home/justinyu/nfs_us/nfs/data/sz_03/20250417" # Dish loading datasets
 
-        # "/home/justinyu/nfs_us/test_justin/20250618"
-        "/home/justinyu/nfs_us/philipp/internal_justin/061825_annotated_dishes/unload_dishes_from_tabletop_dish_rack"
+        # "/home/justinyu/nfs_us/test_justin/20250618" # TEST DATA - SINGLE EPISODE FROM US YAM STATION
+
+        "/home/justinyu/nfs_us/philipp/internal_justin/061825_annotated_dishes/unload_dishes_from_tabletop_dish_rack" # Dish Unloading Dataset
 
     ])
-    repo_name: str = "uynitsuj/yam_unload_dishes_dishrack_joint_space"
-    language_instruction: str = "Perform bimanual manipulation task" # Default task name; gets overwritten by task name in metadata
+    repo_name: str = "uynitsuj/yam_unload_dishes_dishrack_cartesian_space" # TODO: Change this before running
+
+    language_instruction: str = "Perform bimanual manipulation task" # Gets overwritten by the task name in episode metadata
     
     # YAMS camera keys
     camera_keys: List[str] = field(default_factory=lambda: [
-        "left_camera-images-rgb", "right_camera-images-rgb", "top_camera-images-rgb"
+        "left_camera-images-rgb", "right_camera-images-rgb", "top_camera-images-rgb" 
     ])
     
     resize_size: int = 224 # image size
     fps: int = 30 # video fps
     chunk_size: int = 1000 # number of frames per chunk (for memory considerations)
-    max_workers: int = 6 # Set lower on machines with less memory
+    max_workers: int = 1 # Set lower on machines with less memory -- must be 1 for cartesian
     no_filter_quality: bool = False # If True, will not filter out low quality episodes
     max_episodes: Optional[int] = None # If specified, will only process this many episodes
     skip_videos: bool = False # If True, will not process videos
-    push_to_hub: bool = False # If True, will push to huggingface hub after processing
+
+    """
+    Huggingface hub settings:
+    """
+    push_to_hub: bool = False # If True, will push to huggingface hub after processing (Not required, can convert dataset and train using the local directory)
     push_to_hub_only: bool = False  # Only push existing dataset to hub, skip processing
 
-    action_space: Literal["abs_joint", "abs_cartesian"] = "abs_joint" # "abs_joint" for absolute joint positions, "abs_cartesian" for absolute cartesian positions
+    action_space: Literal["abs_joint", "abs_cartesian"] = "abs_cartesian" # "abs_joint" for absolute joint positions, "abs_cartesian" for absolute cartesian positions
     
     # Memory management settings
     max_frames_per_chunk: int = 1000  # Process episodes in chunks to avoid OOM on long episodes
@@ -73,7 +79,7 @@ class YAMSConfig:
     encoder_name: Optional[str] = None  # Force specific encoder, or None for auto-selection
     encoding_quality: str = 'fast'  # 'fastest' or 'fast'
 
-    robot: Optional[object] = field(default=None, repr=False) # YAMSBaseInterface object (Populated later, used for FK in the case of abs_cartesian)
+    robot: Optional[object] = field(default=None, repr=False) # YAMSBaseInterface object (Used for FK in the case of abs_cartesian)
 
 # Import utility modules
 try:

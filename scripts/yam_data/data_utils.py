@@ -216,6 +216,38 @@ def calculate_actions_cartesian(full_joint_state: np.ndarray, seq_length: int, r
 
     return cartesian_states, cartesian_actions
 
+def calculate_actions_delta_cartesian(full_joint_state: np.ndarray, seq_length: int, robot: Any):
+    from openpi.utils.matrix_utils import quat_to_rot_6d
+    joint_states = full_joint_state[:seq_length]
+
+    # joint states ordering: left_joint_pos, left_gripper_pos, right_joint_pos, right_gripper_pos
+    # T_left_ee, T_right_ee = robot.solve_fk_base(joint_states[:, :6], joint_states[:, 7:13]) # BUGGY, INTRODUCES A POSE DELAY
+    cartesian_states_list = []
+    cartesian_actions_list = []
+
+    for i in range(seq_length): # For some reason running batched FK is buggy -- camera lags behind pose so delay is introduced somewhere somehow
+        T_left_ee, T_right_ee = robot.solve_fk_base(joint_states[i, :6], joint_states[i, 7:13])
+        T_left_ee_6d = quat_to_rot_6d(T_left_ee.rotation().wxyz[None, :], scalar_first=True)
+        T_right_ee_6d = quat_to_rot_6d(T_right_ee.rotation().wxyz[None, :], scalar_first=True)
+        T_left_ee_pos = T_left_ee.wxyz_xyz[-3:].reshape(1, -1)
+        T_right_ee_pos = T_right_ee.wxyz_xyz[-3:].reshape(1, -1)
+        left_gripper_pos = joint_states[i, 6].reshape(-1, 1)
+        right_gripper_pos = joint_states[i, 13].reshape(-1, 1)
+        cartesian_states = np.concatenate([T_left_ee_6d, T_left_ee_pos, left_gripper_pos, T_right_ee_6d, T_right_ee_pos, right_gripper_pos], axis=1)[0]
+        cartesian_states_list.append(cartesian_states)
+    cartesian_abs_states = np.stack(cartesian_states_list, axis=0)
+
+    for i in range(seq_length):
+        cartesian_actions_t = cartesian_abs_states[i+1] - cartesian_abs_states[i]
+        # keep grippers absolute
+        cartesian_actions_t[6] = cartesian_abs_states[i+1, 6]
+        cartesian_actions_t[13] = cartesian_abs_states[i+1, 13]
+
+        assert len(cartesian_actions_t.shape) == 1
+        cartesian_actions_list.append(cartesian_actions_t)
+    
+    cartesian_delta_actions = np.stack(cartesian_actions_list, axis=0)
+    return cartesian_abs_states, cartesian_delta_actions
 
 
 def create_frame_data(joint_states: np.ndarray, joint_actions: np.ndarray, 

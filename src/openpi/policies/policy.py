@@ -60,6 +60,7 @@ class Policy(BasePolicy):
         outputs["policy_timing"] = {
             "infer_ms": model_time * 1000,
         }
+        print(f"Time taken for inference: {model_time * 1000} ms")
         return outputs
 
     @property

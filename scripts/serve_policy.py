@@ -19,6 +19,7 @@ class EnvMode(enum.Enum):
     DROID = "droid"
     LIBERO = "libero"
     XDOF = "xdof"
+    XDOF_FAST = "xdof_fast"
 
 
 @dataclasses.dataclass
@@ -60,7 +61,11 @@ class Args:
 DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
     EnvMode.XDOF: Checkpoint(
         config="pi0_yam_low_mem_finetune",
-        dir="/home/justinyu/checkpoints/pi0_yam_low_mem_finetune/load_dishes_into_tabletop_dishrack/25000",
+        dir="/home/justinyu/checkpoints/pi0_yam_low_mem_finetune/unload_dishes_from_dishrack/17000",
+    ),
+    EnvMode.XDOF_FAST: Checkpoint(
+        config="pi0fast_yam_low_mem_finetune",
+        dir="/home/justinyu/checkpoints/pi0fast_yam_low_mem_finetune/unload_dishes_from_dishrack/20000",
     ),
     EnvMode.ALOHA: Checkpoint(
         config="pi0_aloha",

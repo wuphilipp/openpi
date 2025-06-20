@@ -618,7 +618,7 @@ class YAMSLeRobotViewer:
 
 
 def main(
-    dataset_path: str = "/home/justinyu/.cache/huggingface/lerobot/uynitsuj/yam_unload_dishes_dishrack_joint_space",
+    dataset_path: str = "/home/justinyu/.cache/huggingface/lerobot/uynitsuj/yam_unload_dishes_dishrack_cartesian_space",
 ):
     """
     Main function for YAMS LeRobot trajectory viewer.
