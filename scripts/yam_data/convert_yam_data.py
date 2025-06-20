@@ -46,7 +46,7 @@ class YAMSConfig:
         "/home/justinyu/nfs_us/philipp/internal_justin/061825_annotated_dishes/unload_dishes_from_tabletop_dish_rack" # Dish Unloading Dataset
 
     ])
-    repo_name: str = "uynitsuj/yam_unload_dishes_dishrack_cartesian_space" # TODO: Change this before running
+    repo_name: str = "uynitsuj/yam_unload_dishes_dishrack_joint_space" # TODO: Change this before running
 
     language_instruction: str = "Perform bimanual manipulation task" # Gets overwritten by the task name in episode metadata
     
