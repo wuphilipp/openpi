@@ -1,4 +1,5 @@
 """See _CONFIGS for the list of available configs."""
+import os
 
 import abc
 from collections.abc import Sequence
@@ -530,7 +531,7 @@ class TrainConfig:
     assets_base_dir: str = "./assets"
     # Base directory for checkpoints.
     # checkpoint_base_dir: str = "./checkpoints"
-    checkpoint_base_dir: str = "/home/justinyu/checkpoints"
+    checkpoint_base_dir: str = os.path.expanduser("/home/justinyu/checkpoints")
 
     # Random seed that will be used by random generators during training.
     seed: int = 42
