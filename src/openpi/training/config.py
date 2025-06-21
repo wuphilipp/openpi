@@ -531,7 +531,7 @@ class TrainConfig:
     assets_base_dir: str = "./assets"
     # Base directory for checkpoints.
     # checkpoint_base_dir: str = "./checkpoints"
-    checkpoint_base_dir: str = os.path.expanduser("/home/justinyu/checkpoints")
+    checkpoint_base_dir: str = os.path.expanduser("~/justinyu/checkpoints")
 
     # Random seed that will be used by random generators during training.
     seed: int = 42
